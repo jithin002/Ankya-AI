@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+.env
+grammar_cache.db*
+fine_tuned_trocr_small/
+fine_tuned_trocr_small_unfrozen/
+logs/

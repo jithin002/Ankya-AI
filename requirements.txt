@@ -1,0 +1,42 @@
+easyocr
+Pillow
+opencv-python-headless
+
+# transformers + GPU inference
+transformers>=4.30.0
+accelerate
+sentencepiece
+
+###torch  # IMPORTANT: install GPU version manually depending on CUDA version
+
+sentence-transformers
+
+# API
+fastapi
+uvicorn[standard]
+python-multipart
+
+# text cleaning
+ftfy
+
+# NLP
+spacy
+
+### Optional: if you still keep any LanguageTool fallback
+###language-tool-python
+
+# For grammar scoring + edit distance
+python-Levenshtein
+
+# PDF handling
+pdf2image
+
+# Utilities
+tqdm
+
+
+pytesseract
+matplotlib
+numpy
+json
+jiwer
