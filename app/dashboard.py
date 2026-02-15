@@ -25,6 +25,10 @@ st.markdown("""
         border-radius: 10px;
         box-shadow: 2px 2px 5px rgba(0,0,0,0.1);
         text-align: center;
+        color: #333333; /* Ensure text is visible on light bg */
+    }
+    .metric-card h3 {
+        color: #333333;
     }
     .score-big {
         font-size: 3em;
@@ -39,12 +43,13 @@ st.markdown("""
         padding: 20px;
         border-radius: 10px;
         border-left: 5px solid #4CAF50;
+        color: #333333; /* Ensure text is visible on light bg */
     }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📝 Intelligent Classroom Grader")
-st.markdown("Upload a student's handwritten answer to grade it automatically using **OCR + AI**.")
+st.title("📝 Ankya AI - Intelligent Classroom Grader")
+st.markdown("Upload a student's handwritten answer to grade it automatically using **OCR + AI (Ankya)**.")
 
 # --- Sidebar: Configuration ---
 st.sidebar.header("⚙️ Grading Rubric")

@@ -67,17 +67,19 @@ class ModelManager:
     def load_trocr(self, model_name=None):
         print("[ModelManager] Loading TrOCR...")
         start = time.time()
-        # prefer local fine-tuned checkpoint
-        # if model_name is None:
-        #     local_dir = os.path.join(os.path.dirname(__file__), "..", "fine_tuned_trocr_small")
-        #     local_dir = os.path.abspath(local_dir)
-        #     if os.path.exists(local_dir):
-        #         model_name = local_dir
-        #     else:
-        #         model_name = "microsoft/trocr-small-handwritten"
+        #prefer local fine-tuned checkpoint
+        """if model_name is None:
+            local_dir = os.path.join(os.path.dirname(__file__), "..", "fine_tuned_trocr_small")
+            local_dir = os.path.abspath(local_dir)
+            if os.path.exists(local_dir):
+                model_name = local_dir
+            else:
+                model_name = "microsoft/trocr-small-handwritten"
+"""
         if model_name is None:
             model_name = "microsoft/trocr-small-handwritten"
         
+
         try:
             model = VisionEncoderDecoderModel.from_pretrained(model_name).to(self.device)
             processor = ViTImageProcessor.from_pretrained(model_name)
@@ -494,28 +496,48 @@ def presentation_score(student_text: str) -> float:
 def llm_grade(question, ref_short, ref_long, student, tokenizer, model) -> Dict:
     if not tokenizer or not model: return None
     
-    # Manual TinyLlama template to ensure correct formatting
-    # <|system|>...</s><|user|>...</s><|assistant|>
-    
+    # -------------------------------------------------------------------------
+    # TODO: FUTURE IMPLEMENTATION - LLM SCORING
+    # Currently, we only use the LLM to generate qualitative feedback text.
+    # In the future, we should instruct the LLM to also output a score (0-10)
+    # or specific component scores (grammar, keywords, etc.) in a structured format 
+    # (like JSON) once we have a model capable of reliable structured output 
+    # or improve the prompting strategy for this small model.
+    # -------------------------------------------------------------------------
+
     def trunc(s, n): return s[:n] if s else ""
     
-    sys_msg = "You are an exam grader. Grade the student answer based on the reference. Return ONLY a valid JSON object."
-    user_msg = f"""Question: {trunc(question, 200)}
-Key Points: {trunc(", ".join(ref_short), 250)}
-Reference: {trunc(ref_long, 350)}
-Student Answer: {trunc(student, 500)}
+    # STRICT Prompt engineering to prevent "coding mode"
+    sys_msg = (
+        "You are a Teacher's Assistant grading an exam. "
+        "Your goal is to provide constructive feedback to the student based on the reference answer. "
+        "Do NOT write any code (Python, etc.). "
+        "Do NOT talk about programming. "
+        "Focus ONLY on the subject matter (Physics, History, etc.)."
+    )
+    
+    user_msg = f"""
+[Question]
+{trunc(question, 200)}
 
-Return a JSON object with these exact keys:
-{{
-  "keyword_pct": <0-100>,
-  "semantic_pct": <0-100>,
-  "grammar_pct": <0-100>,
-  "coverage_pct": <0-100>,
-  "presentation_pct": <0-100>,
-  "recommended_marks": <0-10>,
-  "explanation": "<short feedback>"
-}}"""
+[Reference Answer]
+{trunc(ref_long, 350)}
 
+[Key Points to Look For]
+{trunc(", ".join(ref_short), 250)}
+
+[Student's Answer]
+{trunc(student, 500)}
+
+[Instruction]
+Write a short feedback comment (2-3 sentences) to the student.
+- If the answer is correct, praise them and mention what they got right.
+- If the answer is incorrect or incomplete, explain clearly what is missing based on the Reference Answer.
+- Speak directly to the student ("You mentioned...", "You missed...").
+- DO NOT WRITE CODE.
+"""
+
+    # TinyLlama format
     prompt = f"<|system|>\n{sys_msg}</s>\n<|user|>\n{user_msg}</s>\n<|assistant|>\n"
 
     pad_token_id = tokenizer.eos_token_id
@@ -523,28 +545,33 @@ Return a JSON object with these exact keys:
     
     try:
         with torch.no_grad():
-            out = model.generate(**inputs, max_new_tokens=300, do_sample=False, temperature=0.1, pad_token_id=pad_token_id)
+            # slightly lower temp for more focused output
+            out = model.generate(
+                **inputs, 
+                max_new_tokens=250, # Shorter to prevent rambling
+                do_sample=False, 
+                temperature=0.2, 
+                repetition_penalty=1.2, # Reduce loops
+                pad_token_id=pad_token_id
+            )
         
         # Decode only new tokens
         generated_ids = out[0][inputs['input_ids'].shape[1]:]
         decoded = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
-        print(f"[LLM RAW] {decoded}") # Debug
+        print(f"[LLM FEEDBACK] {decoded}") # Debug
         
-        # Parse JSON
-        jstart = decoded.find("{")
-        jend = decoded.rfind("}") + 1
-        if jstart >= 0 and jend > jstart:
-            json_str = decoded[jstart:jend]
-            try:
-                return json.loads(json_str)
-            except:
-                import ast
-                try:
-                    return ast.literal_eval(json_str)
-                except:
-                    pass
+        # Clean up if model still tries to chat
+        if "Student Answer:" in decoded:
+            decoded = decoded.split("Student Answer:")[-1].strip()
+        
+        return {
+            "explanation": decoded,
+            "recommended_marks": 0.0 
+        }
+            
     except Exception as e:
         print(f"LLM Error: {e}")
+        traceback.print_exc()
     return None
 
 # ---------------- Pipeline Orchestrator ----------------
