@@ -1,0 +1,18 @@
+{
+  "ground_truth_text": "First law of motion (Law of Inertia). An object at rest stays at rest, and an object in motion continues in uniform motion in a straight line unless acted upon by an external force. Second law of motion. Rate of change of momentum of an object is directly proportional to the applied force. F=ma. F-force, m-mass, a-acceleration. Third law of Motion. For every action, there is an equal and opposite reaction. When you apply a force on an object, it applies an equal force back in the opposite direction.",
+  "human_marks": 9.0,
+  "v2": {
+    "wer": 2.168539325842697,
+    "cer": 1.3075396825396826,
+    "time": 179.10569667816162,
+    "marks": 5.1811632990837095,
+    "text": "Newton's Laws o Metin Newton's Laws o Metin iaw bist_ O isc Lav of motion (lews % Tnert io) O isc Lav of motion (lews % Tnert io) Znert io An ct Jest at Sest object Aw Object ab Best slays at scext \u00bb Orel acl 2 @x motion continues object L Qua Object ae maovion continues, ee Mi nOY ma 1ll unifOr n motion Ul 0 MOON og strate ht AG le Jnex less Un 3 KO UKLOSS acleol Upon upow b b Qn. \u201ci exteenal fo4e Se cencl aw notieu DO Seceonh La 4 rition disozliy Ak xoneulun Rate ebject _ chaw& % & %f te ite Prepetional ke Ihe applied force anal. tokos Powe Prepetional ke Ihe applied force anal. tokos Powe Qsl Prepetional ke Ihe applied force anal. tokos Powe Kekc2 dsecun Jfe Ll fokce Fame F = Fw Force , WA > mass VA MaS $ Q a> acceleratun @CC / 3 S)ivol Low q Motion Motion Fer eu action there W\u00ae QUA eqvall coud opposite Fe 1S Cudl QA Fer eu action there W\u00ae QUA eqvall coud opposite eqpal eveguyd Kaxee_ Gu Aeacta an gbiect , Uken tou apply it apples on equal perce back un the opposite 4 apples 0pposrte a @9Lal Keqe dlinecksw 0"
+  },
+  "v3": {
+    "wer": 0.7865168539325843,
+    "cer": 0.6111111111111112,
+    "time": 244.26603627204895,
+    "marks": 6.627999572753907,
+    "text": "first law of motion ( how of Inert in at rest An object at rest stays at west , and an object in motion continues object in motion continues in uniform motion . in a straight hikes . unless acted upon by an external force . Second law motion . HelpLearn to editCommunity portalRecent changesUpload file"
+  }
+}
