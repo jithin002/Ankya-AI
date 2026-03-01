@@ -35,4 +35,48 @@ Output ONLY this JSON structure with your assessment:
 }}"""
 
     # TinyLlama chat template
-    prompt = f"<|system|>\n{sys_msg}</s>\n
+    prompt = f"<|system|>\n{sys_msg}</s>\n<|user|>\n{user_msg}</s>\n<|assistant|>\n"
+
+    import torch
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    pad_token_id = tokenizer.eos_token_id
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1500).to(device)
+    
+    try:
+        with torch.no_grad():
+            out = model.generate(
+                **inputs, 
+                max_new_tokens=300,
+                do_sample=False, 
+                temperature=0.1, 
+                repetition_penalty=1.2,
+                pad_token_id=pad_token_id
+            )
+        
+        # Decode only new tokens
+        generated_ids = out[0][inputs['input_ids'].shape[1]:]
+        decoded = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+        print(f"[LLM JSON FEEDBACK] {decoded}") # Debug
+        
+        # Extract JSON
+        start = decoded.find('{')
+        end = decoded.rfind('}')
+        if start != -1 and end != -1:
+            json_str = decoded[start:end+1]
+            data = json.loads(json_str)
+            for k in ["keyword_pct", "semantic_pct", "grammar_pct", "coverage_pct", "presentation_pct", "recommended_marks"]:
+                if k in data:
+                    try:
+                        data[k] = float(data[k])
+                    except (ValueError, TypeError):
+                        pass
+            return data
+        else:
+            print("No JSON found in LLM output.")
+            return None
+            
+    except Exception as e:
+        print(f"LLM Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
