@@ -67,26 +67,43 @@ class ModelManager:
     def load_trocr(self, model_name=None):
         print("[ModelManager] Loading TrOCR...")
         start = time.time()
-        #prefer local fine-tuned checkpoint
-        """if model_name is None:
-            local_dir = os.path.join(os.path.dirname(__file__), "..", "fine_tuned_trocr_small")
-            local_dir = os.path.abspath(local_dir)
-            if os.path.exists(local_dir):
-                model_name = local_dir
-            else:
-                model_name = "microsoft/trocr-small-handwritten"
-"""
-        if model_name is None:
-            model_name = "microsoft/trocr-small-handwritten"
-        
+        base_model_name = "microsoft/trocr-small-handwritten"
 
         try:
-            model = VisionEncoderDecoderModel.from_pretrained(model_name).to(self.device)
-            processor = ViTImageProcessor.from_pretrained(model_name)
+            model = VisionEncoderDecoderModel.from_pretrained(base_model_name).to(self.device)
+            processor = ViTImageProcessor.from_pretrained(base_model_name)
             try:
-                tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+                tokenizer = AutoTokenizer.from_pretrained(base_model_name, use_fast=True)
             except:
-                tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False)
+                tokenizer = AutoTokenizer.from_pretrained(base_model_name, use_fast=False)
+            
+            # Load LoRA adapter if it exists (either in root or latest checkpoint)
+            local_dir = os.path.join(os.path.dirname(__file__), "..", "fine_tuned_trocr_small")
+            local_dir = os.path.abspath(local_dir)
+            
+            adapter_path = None
+            if os.path.exists(os.path.join(local_dir, "adapter_config.json")):
+                adapter_path = local_dir
+            elif os.path.exists(local_dir):
+                # Check for checkpoint directories
+                checkpoints = [os.path.join(local_dir, d) for d in os.listdir(local_dir) if d.startswith("checkpoint-")]
+                if checkpoints:
+                    # Sort by checkpoint number
+                    checkpoints.sort(key=lambda x: int(x.split("-")[-1]))
+                    latest_chkpt = checkpoints[-1]
+                    if os.path.exists(os.path.join(latest_chkpt, "adapter_config.json")):
+                        adapter_path = latest_chkpt
+
+            if adapter_path:
+                print(f"[ModelManager] Found LoRA adapter at {adapter_path}. Loading on top of base model...")
+                from peft import PeftModel
+                model = PeftModel.from_pretrained(model, adapter_path)
+                # Merge LoRA weights into base model — required so generate() works with positional args
+                model = model.merge_and_unload()
+                print("[ModelManager] LoRA adapter merged successfully.")
+            else:
+                print("[ModelManager] No local LoRA adapter found. Using base model.")
+
             print(f"[ModelManager] TrOCR loaded in {time.time()-start:.2f}s")
             return {"model": model, "processor": processor, "tokenizer": tokenizer}
         except Exception as e:

@@ -11,9 +11,14 @@ import io
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--out_dir", default="data", help="output dir for images and labels.csv")
-parser.add_argument("--subset", type=int, default=None, help="if set, randomly sample this many examples")
-parser.add_argument("--split", default="train", help="which split to use (train/validation/test) - depends on HF dataset")
+parser.add_argument("--subset", type=int, default=None,
+                    help="(optional) cap at N examples. Default: None downloads ALL ~13,000 lines.")
+parser.add_argument("--split", default="train", help="which split to use (train/validation/test)")
 args = parser.parse_args()
+if args.subset is not None:
+    print(f"[INFO] Subset cap: {args.subset} examples")
+else:
+    print("[INFO] No subset cap — downloading FULL dataset (~13,000 lines). This may take a few minutes.")
 
 os.makedirs(args.out_dir, exist_ok=True)
 images_dir = os.path.join(args.out_dir, "images")

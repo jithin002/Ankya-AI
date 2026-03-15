@@ -8,3 +8,4 @@ grammar_cache.db*
 fine_tuned_trocr_small/
 fine_tuned_trocr_small_unfrozen/
 logs/
+*.zip
