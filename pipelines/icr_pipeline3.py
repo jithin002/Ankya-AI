@@ -53,7 +53,8 @@ class ModelManager:
             torch.cuda.empty_cache()
     
     def load_ocr(self):
-        print("[ModelManager] Loading EasyOCR...")
+        self.garbage_collect()  # Clear any residual VRAM before loading
+        print("[ModelManager] Loading EasyOCR (GPU)...")
         start = time.time()
         reader = easyocr.Reader(['en'], gpu=(self.device == "cuda"))
         print(f"[ModelManager] EasyOCR loaded in {time.time()-start:.2f}s")
@@ -65,6 +66,7 @@ class ModelManager:
         print("[ModelManager] EasyOCR unloaded")
 
     def load_trocr(self, model_name=None):
+        self.garbage_collect()  # Clear any residual VRAM before loading
         print("[ModelManager] Loading TrOCR...")
         start = time.time()
         base_model_name = "microsoft/trocr-small-handwritten"
@@ -104,6 +106,9 @@ class ModelManager:
             else:
                 print("[ModelManager] No local LoRA adapter found. Using base model.")
 
+            # Cast to float16 (half-precision) to halve VRAM usage without accuracy loss
+            if self.device == "cuda":
+                model = model.half()
             print(f"[ModelManager] TrOCR loaded in {time.time()-start:.2f}s")
             return {"model": model, "processor": processor, "tokenizer": tokenizer}
         except Exception as e:
@@ -120,6 +125,7 @@ class ModelManager:
         print("[ModelManager] TrOCR unloaded")
 
     def load_sentence_transformer(self):
+        self.garbage_collect()  # Clear any residual VRAM before loading
         print("[ModelManager] Loading SentenceTransformer...")
         start = time.time()
         model = SentenceTransformer('all-MiniLM-L6-v2', device=self.device)
@@ -132,6 +138,7 @@ class ModelManager:
         print("[ModelManager] SentenceTransformer unloaded")
 
     def load_grammar_model(self):
+        self.garbage_collect()  # Clear any residual VRAM before loading
         print("[ModelManager] Loading Grammar Model...")
         start = time.time()
         name = "prithivida/grammar_error_correcter_v1"
@@ -147,6 +154,7 @@ class ModelManager:
         print("[ModelManager] Grammar Model unloaded")
 
     def load_llm(self):
+        self.garbage_collect()  # Clear any residual VRAM before loading
         print("[ModelManager] Loading LLM (TinyLlama)...")
         start = time.time()
         name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
@@ -184,7 +192,10 @@ def trocr_recognize_pil(pil_img: Image.Image, trocr_bundle, max_new_tokens: int 
     tokenizer = trocr_bundle["tokenizer"]
     
     pixel_values = processor(images=pil_img, return_tensors="pt").pixel_values.to(DEVICE)
-    with torch.no_grad():
+    # Cast to float16 if on CUDA to match the model's dtype
+    if DEVICE == "cuda":
+        pixel_values = pixel_values.half()
+    with torch.inference_mode():
         generated_ids = model.generate(pixel_values, max_new_tokens=max_new_tokens, num_beams=num_beams, do_sample=False)
     text = tokenizer.decode(generated_ids[0], skip_special_tokens=True).strip()
     return text
@@ -256,6 +267,34 @@ def recognize_with_trocr_per_line(image_path: str, easyocr_blocks: List[Dict], t
 def normalize_text(text: str) -> str:
     text = text.replace('\r', ' ').replace('\n', ' ')
     text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+
+def remove_ruled_lines(img_bgr) -> object:
+    """Use OpenCV morphological transforms to erase horizontal ruled lines from notebook paper.
+    Returns a clean BGR image with only the handwriting remaining."""
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    # Adaptive threshold to isolate dark pixels
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    # Detect horizontal lines using a wide, flat kernel
+    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (int(binary.shape[1] // 4), 1))
+    horizontal_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horizontal_kernel, iterations=2)
+    # Remove them from the original binary image
+    cleaned = cv2.subtract(binary, horizontal_lines)
+    # Restore handwriting on white background
+    result = cv2.bitwise_not(cleaned)
+    return cv2.cvtColor(result, cv2.COLOR_GRAY2BGR)
+
+
+def clean_ocr_noise(text: str) -> str:
+    """Strip out patterns that come from ruled lines being misread by OCR."""
+    import re as _re
+    # Remove 3+ repeated non-alphanumeric characters (e.g., '___', '...', '===', "'''", '---')
+    text = _re.sub(r'([^\w\s]){3,}', ' ', text)
+    # Remove isolated single non-alphanumeric tokens
+    text = _re.sub(r'\s[^\w\s]{1,2}\s', ' ', text)
+    # Collapse whitespace
+    text = _re.sub(r'\s+', ' ', text).strip()
     return text
 
 def deskew_image(img_gray):
@@ -596,21 +635,39 @@ Write a short feedback comment (2-3 sentences) to the student.
 def evaluate_from_image(image_path: str, question: str, reference: Dict, debug_save_image: bool = False) -> Dict:
     print(f"\n--- Processing {os.path.basename(image_path)} ---")
     
+    # 0. Pre-processing: Remove ruled lines (DISABLED — enable when ready to test)
+    # raw_img = cv2.imread(image_path)
+    # if raw_img is not None:
+    #     cleaned_img = remove_ruled_lines(raw_img)
+    #     import tempfile
+    #     tmp_cleaned = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
+    #     cv2.imwrite(tmp_cleaned.name, cleaned_img)
+    #     tmp_cleaned.close()
+    #     ocr_source_path = tmp_cleaned.name
+    # else:
+    #     ocr_source_path = image_path
+    ocr_source_path = image_path  # Use raw image for now
+    
     # 1. OCR Stage
     print("Stage 1: OCR")
     ocr_reader = MM.load_ocr()
-    trocr_bundle = MM.load_trocr() # optional, depends if we want TrOCR
+    trocr_bundle = MM.load_trocr()
     
-    blocks = ocr_image_to_blocks(image_path, ocr_reader, trocr_bundle, debug_save_image)
+    blocks = ocr_image_to_blocks(ocr_source_path, ocr_reader, trocr_bundle, debug_save_image)
     
     MM.unload_trocr(trocr_bundle)
     MM.unload_ocr(ocr_reader)
+    if ocr_source_path != image_path:
+        try: os.unlink(ocr_source_path)
+        except: pass
     
     blocks = merge_nearby_horizontal_blocks(blocks)
     paras = coalesce_blocks(blocks)
     student_text = " ".join([p["text"] for p in paras])
+    # Post-process: scrub any remaining ruled-line OCR artifacts
+    student_text = clean_ocr_noise(student_text)
     avg_ocr = np.mean([p.get("conf",0) for p in paras]) if paras else 0.0
-    print(f"OCR Text ({len(student_text)} chars): {student_text[:50]}...")
+    print(f"OCR Text ({len(student_text)} chars): {student_text[:100]}...")
 
     # 2. Semantic Stage
     print("Stage 2: Semantic Analysis")
