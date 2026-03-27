@@ -1,62 +1,210 @@
 import React, { useState, useRef, useCallback } from 'react';
-import { UploadCloud, Sparkles, ChevronDown, ChevronUp, AlertCircle, CheckCircle2, FileText, BookOpen, Loader2 } from 'lucide-react';
+import { UploadCloud, Sparkles, AlertCircle, CheckCircle2, BookOpen, Loader2, ChevronLeft, ChevronRight, X, ChevronDown, ChevronUp } from 'lucide-react';
 import './App.css';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-
-interface Rubric {
-  max_marks: number;
-  reference_long: string;
-  reference_short: string[];
-  keywords: { term: string; weight: number }[];
-}
 
 interface QAItem {
   number: number;
   section: string;
   question: string;
   answer: string;
-  rubric: Rubric;
+  rubric: { max_marks: number; reference_long: string; reference_short: string[]; keywords: { term: string; weight: number }[] };
 }
 
-interface GradingResult {
-  page_num?: number;
-  component_scores?: {
-    keyword_pct?: number;
-    grammar_pct?: number;
-    semantic_pct?: number;
-    presentation_pct?: number;
-  };
+interface RubricType {
+  max_marks?: number;
+  reference_long?: string;
+  reference_short?: string[];
+  keywords?: { term: string; weight: number }[];
+}
+
+interface AnswerResult {
+  q_label: string;
+  y_pct: number;
+  auto_matched_question?: number;
+  matched_question_text?: string;
+  rubric?: RubricType;
+  student_text?: string;
+  full_page_text?: string;
+  component_scores?: { keyword_pct?: number; grammar_pct?: number; semantic_pct?: number; coverage_pct?: number; presentation_pct?: number };
   llm_output?: { recommended_marks?: number; explanation?: string };
   deterministic_recommended_marks?: number;
   composite_confidence?: number;
-  student_text?: string;
-  [key: string]: any;
 }
 
 interface PageEntry {
   pageIndex: number;
   blob: Blob;
   url: string;
-  result: GradingResult | null;
+  results: AnswerResult[];
   loading: boolean;
   error: string | null;
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
 const API = 'http://localhost:8000';
 
-function ScoreBar({ label, pct }: { label: string; pct: number }) {
+function Bar({ label, val }: { label: string; val: number }) {
   return (
     <div className="metric">
-      <div className="metric-header">
-        <span>{label}</span>
-        <span>{Math.round(pct)}%</span>
+      <div className="metric-row"><span>{label}</span><span>{Math.round(val)}%</span></div>
+      <div className="bar-bg"><div className="bar-fill" style={{ width: `${val}%` }} /></div>
+    </div>
+  );
+}
+
+function AnswerPopup({
+  res, onClose, top, onSelect, qaDataset, manualQNum, onManualSelect
+}: {
+  res: AnswerResult; onClose: () => void; top: string; onSelect: () => void;
+  qaDataset: QAItem[]; manualQNum: number | null; onManualSelect: (n: number | null) => void;
+}) {
+  const lm = res.llm_output?.recommended_marks ?? 0;
+  const dm = res.deterministic_recommended_marks ?? 0;
+  const conf = res.composite_confidence ?? 0;
+  const finalScore = (conf > 0.6 && lm > 0) ? lm : dm;
+  const sc = res.component_scores ?? {};
+  const maxM = res.rubric?.max_marks ?? 10;
+  const displayQ = manualQNum ?? res.auto_matched_question;
+
+  return (
+    <div className="answer-popup" style={{ top }} onClick={onSelect}>
+      <button className="popup-close" onClick={e => { e.stopPropagation(); onClose(); }}><X size={16} /></button>
+
+      {/* Header: chip + question selector */}
+      <div style={{ marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+        {manualQNum != null
+          ? <span className="chip chip-yellow">✏️ Q{manualQNum}</span>
+          : displayQ != null
+            ? <span className="chip chip-green">🎯 Q{displayQ}</span>
+            : <span className="chip chip-yellow">⚙️ Q{res.q_label}</span>}
+        <span style={{ fontSize: '0.72rem', color: 'var(--muted)' }}>/ {maxM} marks</span>
       </div>
-      <div className="progress-bar-bg">
-        <div className="progress-bar-fill" style={{ width: `${pct}%` }} />
+
+      {/* Manual question selector (only when qa_dataset loaded) */}
+      {qaDataset.length > 0 && (
+        <div style={{ marginBottom: '0.55rem' }} onClick={e => e.stopPropagation()}>
+          <select
+            className="popup-q-select"
+            value={manualQNum ?? ''}
+            onChange={e => onManualSelect(e.target.value ? Number(e.target.value) : null)}
+          >
+            <option value="">🤖 Auto ({displayQ != null ? `Q${displayQ}` : 'unmatched'})</option>
+            {qaDataset.map(q => (
+              <option key={q.number} value={q.number}>Q{q.number} — {q.question.slice(0, 50)}{q.question.length > 50 ? '…' : ''}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      {/* Score Big Display */}
+      <div style={{ background: 'rgba(16,185,129,.1)', border: '1px solid var(--success)', borderRadius: 8, padding: '0.5rem', textAlign: 'center', marginBottom: '0.6rem' }}>
+        <div style={{ fontSize: '0.75rem', color: 'var(--muted)' }}>Score</div>
+        <div style={{ fontSize: '2rem', fontWeight: 800, color: 'var(--success)', lineHeight: 1.1 }}>{finalScore.toFixed(1)}</div>
+        <div style={{ fontSize: '0.7rem', color: 'var(--muted)' }}>of {maxM}</div>
       </div>
+
+      <Bar label="Keywords" val={sc.keyword_pct ?? 0} />
+      <Bar label="Semantic" val={sc.semantic_pct ?? 0} />
+      <Bar label="Grammar" val={sc.grammar_pct ?? 0} />
+      <Bar label="Presentation" val={sc.presentation_pct ?? 0} />
+
+      {/* Extracted Text */}
+      {res.student_text && (
+        <div style={{ marginTop: '0.5rem' }}>
+          <div style={{ fontSize: '0.72rem', color: 'var(--muted)', marginBottom: 2 }}>📝 Extracted Text</div>
+          <div className="popup-extracted">{res.student_text}</div>
+        </div>
+      )}
+
+      {res.llm_output?.explanation && (
+        <div className="feedback-box" style={{ marginTop: '0.5rem' }}>
+          <strong style={{ fontSize: '0.78rem' }}>🤖 Feedback</strong>
+          <div style={{ marginTop: '0.3rem', fontSize: '0.78rem' }}>{res.llm_output.explanation}</div>
+        </div>
+      )}
+
+      <div style={{ marginTop: '0.4rem', fontSize: '0.68rem', color: 'var(--muted)', textAlign: 'right' }}>
+        Click panel to view rubric →
+      </div>
+    </div>
+  );
+}
+
+// ─── RubricPanel ──────────────────────────────────────────────────────────────
+
+function RubricPanel({ activeResult, qaDataset, manualOverrides, setManualOverrides, onBack }: {
+  activeResult: AnswerResult;
+  qaDataset: QAItem[];
+  manualOverrides: Record<string, number | null>;
+  setManualOverrides: React.Dispatch<React.SetStateAction<Record<string, number | null>>>;
+  onBack: () => void;
+}) {
+  const manualNum = manualOverrides[activeResult.q_label] ?? null;
+  const overrideItem = manualNum != null ? qaDataset.find(q => q.number === manualNum) : null;
+  const displayRubric = overrideItem ? overrideItem.rubric : activeResult.rubric;
+  const displayQ = overrideItem ? overrideItem.number : activeResult.auto_matched_question;
+  const displayQText = overrideItem ? overrideItem.question : activeResult.matched_question_text;
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: '0.5rem', flexWrap: 'wrap' }}>
+        {overrideItem
+          ? <span className="chip chip-yellow">✏️ Q{displayQ} (manual)</span>
+          : displayQ != null
+            ? <span className="chip chip-green">🎯 Q{displayQ}</span>
+            : <span className="chip chip-yellow">⚙️ Q{activeResult.q_label}</span>}
+        <span style={{ fontSize: '0.75rem', color: 'var(--muted)' }}>
+          Max {displayRubric?.max_marks ?? 10} marks
+        </span>
+      </div>
+
+      {qaDataset.length > 0 && (
+        <div style={{ marginBottom: '0.6rem' }}>
+          <div style={{ fontSize: '0.72rem', color: 'var(--muted)', marginBottom: 3 }}>Assign to Question</div>
+          <select
+            className="popup-q-select"
+            style={{ width: '100%' }}
+            value={manualNum ?? ''}
+            onChange={e => setManualOverrides(prev => ({ ...prev, [activeResult.q_label]: e.target.value ? Number(e.target.value) : null }))}
+          >
+            <option value="">🤖 Auto ({displayQ != null ? `Q${displayQ}` : 'unmatched'})</option>
+            {qaDataset.map(q => (
+              <option key={q.number} value={q.number}>Q{q.number} — {q.question.slice(0, 55)}{q.question.length > 55 ? '…' : ''}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      {displayQText && (
+        <div style={{ marginBottom: '0.6rem' }}>
+          <div style={{ fontSize: '0.72rem', color: 'var(--muted)', marginBottom: 2 }}>Question</div>
+          <div style={{ fontSize: '0.82rem', lineHeight: 1.4, color: 'var(--text)', background: 'rgba(255,255,255,0.04)', borderRadius: 6, padding: '0.5rem' }}>
+            {displayQText}
+          </div>
+        </div>
+      )}
+
+      {displayRubric?.reference_long && (
+        <div style={{ marginBottom: '0.6rem' }}>
+          <div style={{ fontSize: '0.72rem', color: 'var(--muted)', marginBottom: 2 }}>Expected Answer</div>
+          <div className="ocr-box" style={{ maxHeight: 80 }}>{displayRubric.reference_long}</div>
+        </div>
+      )}
+
+      {displayRubric?.keywords && displayRubric.keywords.length > 0 && (
+        <div style={{ marginBottom: '0.5rem' }}>
+          <div style={{ fontSize: '0.72rem', color: 'var(--muted)', marginBottom: 4 }}>Keywords</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+            {displayRubric.keywords.map((kw, i) => (
+              <span key={i} className="chip chip-green" style={{ fontSize: '0.7rem' }}>{kw.term}</span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <button className="btn-ghost btn-sm" style={{ marginTop: '0.4rem', width: '100%' }}
+        onClick={onBack}>← Back to manual form</button>
     </div>
   );
 }
@@ -64,381 +212,331 @@ function ScoreBar({ label, pct }: { label: string; pct: number }) {
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  // ── QA dataset ──
   const [qaDataset, setQaDataset] = useState<QAItem[]>([]);
-  const [selectedQ, setSelectedQ] = useState<QAItem | null>(null);
   const [loadingQA, setLoadingQA] = useState(false);
   const [qaError, setQaError] = useState<string | null>(null);
   const qPdfRef = useRef<HTMLInputElement>(null);
   const aPdfRef = useRef<HTMLInputElement>(null);
 
-  // ── Manual rubric ──
-  const [question, setQuestion] = useState("Explain Newton's first law of motion.");
-  const [refLong, setRefLong] = useState("Newton's first law states that an object at rest stays at rest and an object in motion stays in motion unless acted upon by an unbalanced force.");
-  const [refShort, setRefShort] = useState("inertia, object at rest stays at rest, external force");
-  const [keywords, setKeywords] = useState("Newton, Inertia, Force, Motion, Rest");
+  const [refLong, setRefLong] = useState("Newton's first law states that an object at rest stays at rest and an object in motion stays in motion with the same speed and in the same direction unless acted upon by an unbalanced force.");
+  const [refShort, setRefShort] = useState('rest, motion, unbalanced force');
+  const [keywords, setKeywords] = useState('inertia, rest, motion, force');
   const [maxMarks, setMaxMarks] = useState(10);
 
-  // ── Student PDF pages ──
   const [pages, setPages] = useState<PageEntry[]>([]);
   const [pdfFile, setPdfFile] = useState<File | null>(null);
+  const [curIdx, setCurIdx] = useState(0);
   const studentPdfRef = useRef<HTMLInputElement>(null);
 
-  // ── Collapsible panels ──
-  const [showResult, setShowResult] = useState<{ [k: number]: boolean }>({});
-  const [showOcr, setShowOcr] = useState<{ [k: number]: boolean }>({});
+  const [closedPopups, setClosedPopups] = useState<Set<string>>(new Set());
+  const [showOcr, setShowOcr] = useState(false);
+  const [editableScores, setEditableScores] = useState<Record<string, number>>({});
+  const [activeResult, setActiveResult] = useState<AnswerResult | null>(null);
+  // manualOverrides: maps q_label -> manually chosen QAItem number (or null = auto)
+  const [manualOverrides, setManualOverrides] = useState<Record<string, number | null>>({});
 
-  // ── Load QA PDFs ──────────────────────────────────────────────────────────
   const handleLoadQA = async () => {
-    const qFile = qPdfRef.current?.files?.[0];
-    const aFile = aPdfRef.current?.files?.[0];
-    if (!qFile || !aFile) { alert('Please select both a Questions PDF and an Answers PDF.'); return; }
-
+    const qf = qPdfRef.current?.files?.[0];
+    const af = aPdfRef.current?.files?.[0];
+    if (!qf || !af) { alert('Please select both PDFs.'); return; }
     setLoadingQA(true); setQaError(null);
     const fd = new FormData();
-    fd.append('questions_pdf', qFile);
-    fd.append('answers_pdf', aFile);
+    fd.append('questions_pdf', qf);
+    fd.append('answers_pdf', af);
     fd.append('max_marks_per_question', '10');
-
     try {
       const res = await fetch(`${API}/parse-qa-documents/`, { method: 'POST', body: fd });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       setQaDataset(data.qa_dataset);
-      setSelectedQ(null);
-    } catch (e: any) {
-      setQaError(e.message);
-    } finally {
-      setLoadingQA(false);
-    }
+    } catch (e: any) { setQaError(e.message); }
+    finally { setLoadingQA(false); }
   };
 
-  const applyRubric = (item: QAItem) => {
-    setSelectedQ(item);
-    setQuestion(item.question);
-    setRefLong(item.rubric.reference_long);
-    setRefShort(item.rubric.reference_short.join(', '));
-    setKeywords(item.rubric.keywords.map(k => k.term).join(', '));
-    setMaxMarks(item.rubric.max_marks);
-    setPages([]); // reset pages when selecting a new question
-  };
-
-  // ── Load Student PDF as page images ──────────────────────────────────────
   const handleStudentPdf = useCallback(async (file: File) => {
-    setPdfFile(file);
-    setPages([]);
-
-    // Use pdfjs-dist (loaded via CDN in the HTML) to render pages
+    setPdfFile(file); setPages([]); setCurIdx(0); setClosedPopups(new Set());
     const pdfjsLib = (window as any).pdfjsLib;
     if (!pdfjsLib) {
-      // Fallback: just treat the whole PDF as one file
-      const entry: PageEntry = {
-        pageIndex: 0, blob: file, url: URL.createObjectURL(file),
-        result: null, loading: false, error: null
-      };
-      setPages([entry]);
+      setPages([{ pageIndex: 0, blob: file, url: URL.createObjectURL(file), results: [], loading: false, error: null }]);
       return;
     }
-
     const buffer = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
     const entries: PageEntry[] = [];
-
     for (let i = 1; i <= pdf.numPages; i++) {
       const page = await pdf.getPage(i);
       const viewport = page.getViewport({ scale: 1.5 });
       const canvas = document.createElement('canvas');
       canvas.width = viewport.width; canvas.height = viewport.height;
       await page.render({ canvasContext: canvas.getContext('2d')!, viewport }).promise;
-
-      const blob = await new Promise<Blob>((resolve) =>
-        canvas.toBlob((b) => resolve(b!), 'image/jpeg', 0.92)
-      );
-      entries.push({
-        pageIndex: i - 1,
-        blob,
-        url: URL.createObjectURL(blob),
-        result: null, loading: false, error: null
-      });
+      const blob = await new Promise<Blob>(res => canvas.toBlob(b => res(b!), 'image/jpeg', 0.92));
+      entries.push({ pageIndex: i - 1, blob, url: URL.createObjectURL(blob), results: [], loading: false, error: null });
     }
     setPages(entries);
   }, []);
 
-  // ── Grade a single page ─────────────────────────────────────────────────
-  const gradePage = async (idx: number) => {
+  const gradeCurrentPage = async () => {
+    if (pages.length === 0) return;
+    const idx = curIdx;
     setPages(prev => prev.map((p, i) => i === idx ? { ...p, loading: true, error: null } : p));
-    const page = pages[idx];
+    setClosedPopups(new Set());
+    setActiveResult(null);
+    // Note: we do NOT clear manualOverrides — user's Q selection persists across re-analyze
 
+    const page = pages[idx];
     const fd = new FormData();
     fd.append('file', page.blob, `page_${idx + 1}.jpg`);
-    fd.append('question', question);
     fd.append('ref_long', refLong);
     fd.append('ref_short', refShort);
     fd.append('keywords', keywords);
     fd.append('max_marks', maxMarks.toString());
-
-    // Send full qa_dataset so backend can auto-select the correct rubric via RAG
-    if (qaDataset.length > 0) {
-      fd.append('qa_dataset_json', JSON.stringify(qaDataset));
+    if (qaDataset.length > 0) fd.append('qa_dataset_json', JSON.stringify(qaDataset));
+    // Send manual overrides so backend respects user's question selection
+    if (Object.keys(manualOverrides).length > 0) {
+      fd.append('manual_q_overrides_json', JSON.stringify(manualOverrides));
     }
 
     try {
       const res = await fetch(`${API}/grade-page/`, { method: 'POST', body: fd });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
-      const result = data.results?.[0] ?? null;
-      setPages(prev => prev.map((p, i) => i === idx ? { ...p, result, loading: false } : p));
-      setShowResult(prev => ({ ...prev, [idx]: true }));
+      const results: AnswerResult[] = data.results ?? [];
+
+      setPages(prev => prev.map((p, i) => i === idx ? { ...p, results, loading: false } : p));
+
+      // Commit AI scores to the editable grid
+      const newScores: Record<string, number> = {};
+      for (const r of results) {
+        const lm = r.llm_output?.recommended_marks ?? 0;
+        const dm = r.deterministic_recommended_marks ?? 0;
+        const conf = r.composite_confidence ?? 0;
+        const label = r.auto_matched_question != null ? `Q${r.auto_matched_question}` : `Q${r.q_label}`;
+        newScores[label] = Number(((conf > 0.6 && lm > 0) ? lm : dm).toFixed(1));
+      }
+      setEditableScores(prev => ({ ...prev, ...newScores }));
     } catch (e: any) {
       setPages(prev => prev.map((p, i) => i === idx ? { ...p, error: e.message, loading: false } : p));
     }
   };
 
+  const currPage = pages[curIdx] ?? null;
+  const popupKey = (pageIdx: number, qLabel: string) => `${pageIdx}-${qLabel}`;
+
   // ─── Render ───────────────────────────────────────────────────────────────
   return (
-    <div className="app-container">
-      <header>
-        <h1>Intelligent Classroom Grader</h1>
-        <p>Upload Question &amp; Answer PDFs to set a rubric, then grade student answer sheets <strong>page by page</strong>.</p>
-      </header>
+    <div className="app-shell">
 
-      {/* ─── Sidebar ─────────────────────────────────────────────────────── */}
-      <aside>
-        {/* --- Load QA Documents --- */}
-        <div className="glass-panel" style={{ marginBottom: '1rem' }}>
-          <h2 className="panel-title"><BookOpen size={20} style={{ marginRight: 8 }} />Load Q&amp;A Documents</h2>
-          <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '0.75rem' }}>
-            Upload a numbered Questions PDF and its matching Answer Key PDF.
-          </p>
-
-          <label style={{ fontSize: '0.85rem', fontWeight: 600 }}>Questions PDF</label>
-          <input type="file" ref={qPdfRef} accept=".pdf" style={{ display: 'none' }} />
-          <div className="btn-secondary" style={{ textAlign: 'center', cursor: 'pointer', marginTop: '0.4rem', marginBottom: '0.75rem' }}
-            onClick={() => qPdfRef.current?.click()}>
-            {qPdfRef.current?.files?.[0]?.name ?? 'Choose Questions PDF'}
-          </div>
-
-          <label style={{ fontSize: '0.85rem', fontWeight: 600 }}>Answer Key PDF</label>
-          <input type="file" ref={aPdfRef} accept=".pdf" style={{ display: 'none' }} />
-          <div className="btn-secondary" style={{ textAlign: 'center', cursor: 'pointer', marginTop: '0.4rem' }}
-            onClick={() => aPdfRef.current?.click()}>
-            {aPdfRef.current?.files?.[0]?.name ?? 'Choose Answer Key PDF'}
-          </div>
-
-          <button className="btn-primary" style={{ width: '100%', marginTop: '1rem' }}
-            onClick={handleLoadQA} disabled={loadingQA}>
-            {loadingQA ? <><Loader2 size={16} className="spinner" style={{ marginRight: 6 }} />Extracting...</> : 'Extract Q&A'}
-          </button>
-
-          {qaError && <div className="error-box" style={{ marginTop: '0.75rem' }}>{qaError}</div>}
-
-          {/* Question list */}
-          {qaDataset.length > 0 && (
-            <div style={{ marginTop: '1rem' }}>
-              <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.4rem' }}>
-                {qaDataset.length} questions found. Click to set rubric:
-              </div>
-              <div style={{ maxHeight: '220px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
-                {qaDataset.map(item => (
-                  <div key={item.number}
-                    onClick={() => applyRubric(item)}
-                    style={{
-                      padding: '0.5rem 0.75rem', borderRadius: '8px', cursor: 'pointer', fontSize: '0.85rem',
-                      background: selectedQ?.number === item.number ? 'var(--primary-color)' : 'rgba(255,255,255,0.05)',
-                      color: selectedQ?.number === item.number ? '#fff' : 'var(--text-muted)',
-                      transition: 'background 0.2s'
-                    }}>
-                    <strong>Q{item.number}</strong> ({item.section}) — {item.question.slice(0, 50)}{item.question.length > 50 ? '…' : ''}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
+      {/* ─── Header ──────────────────────────────────────────────────────────── */}
+      <header className="app-header">
+        <div>
+          <h1>Ankya AI ⚡</h1>
+          <div className="header-sub">Teacher Re-evaluation Dashboard</div>
         </div>
-
-        {/* --- Manual Rubric --- */}
-        <div className="glass-panel">
-          <h2 className="panel-title">⚙️ Grading Rubric</h2>
-          {selectedQ && (
-            <div style={{ fontSize: '0.8rem', color: 'var(--primary-color)', marginBottom: '0.75rem' }}>
-              <CheckCircle2 size={14} style={{ marginRight: 4 }} />Auto-filled from Q{selectedQ.number}
-            </div>
-          )}
-
-          <div className="form-group">
-            <label>Question</label>
-            <textarea rows={3} value={question} onChange={e => setQuestion(e.target.value)} />
-          </div>
-          <div className="form-group">
-            <label>Reference Answer (Long)</label>
-            <textarea rows={4} value={refLong} onChange={e => setRefLong(e.target.value)} />
-          </div>
-          <div className="form-group">
-            <label>Key Points (comma separated)</label>
-            <textarea rows={2} value={refShort} onChange={e => setRefShort(e.target.value)} />
-          </div>
-          <div className="form-group">
-            <label>Keywords (comma separated)</label>
-            <input type="text" value={keywords} onChange={e => setKeywords(e.target.value)} />
-          </div>
-          <div className="form-group">
-            <label>Max Marks</label>
-            <input type="number" min={1} max={100} value={maxMarks} onChange={e => setMaxMarks(Number(e.target.value))} />
-          </div>
-        </div>
-      </aside>
-
-      {/* ─── Main ────────────────────────────────────────────────────────── */}
-      <main>
-        {/* --- Upload Student PDF --- */}
-        <div className="glass-panel">
-          <h2 className="panel-title">1. Upload Student Answer Sheet</h2>
-          <div className="upload-area"
-            onDragOver={e => e.preventDefault()}
-            onDrop={e => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) handleStudentPdf(f); }}
-            onClick={() => studentPdfRef.current?.click()}>
-            <UploadCloud className="upload-icon" />
-            <h3>Choose a PDF or drag &amp; drop</h3>
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginTop: '0.5rem' }}>PDF — pages will appear below for individual grading</p>
-            <input type="file" ref={studentPdfRef} accept=".pdf,.jpg,.jpeg,.png" style={{ display: 'none' }}
-              onChange={e => { const f = e.target.files?.[0]; if (f) handleStudentPdf(f); }} />
-          </div>
-
-          {pdfFile && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: '1rem', color: 'var(--success)' }}>
-              <CheckCircle2 size={18} /> {pdfFile.name} — {pages.length} page(s) loaded
-            </div>
-          )}
-        </div>
-
-        {/* --- Page-by-Page Grading --- */}
-        {pages.length > 0 && (
-          <div className="glass-panel" style={{ marginTop: '1.5rem' }}>
-            <h2 className="panel-title">2. Grade Page by Page</h2>
-            <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1.5rem' }}>
-              Review each page, then click <strong>Analyze</strong> to grade it against the rubric on the left.
-            </p>
-
-            {pages.map((page, idx) => {
-              const res = page.result;
-              const scores = res?.component_scores ?? {};
-              const llm = res?.llm_output ?? {};
-              const recMarks = res?.deterministic_recommended_marks ?? 0;
-              const conf = res?.composite_confidence ?? 0;
-              const llmMarks = llm.recommended_marks ?? 0;
-              const displayMarks = (conf > 0.6 && llmMarks > 0) ? llmMarks : recMarks;
-
-              return (
-                <div key={idx} style={{ marginBottom: '2rem', borderBottom: '1px solid var(--border)', paddingBottom: '2rem' }}>
-                  {/* Page image + controls */}
-                  <div style={{ display: 'flex', gap: '1.5rem', flexWrap: 'wrap', alignItems: 'flex-start' }}>
-                    <div style={{ flex: '0 0 220px' }}>
-                      <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>
-                        Page {idx + 1}
-                      </div>
-                      <img src={page.url} alt={`Page ${idx + 1}`}
-                        style={{ width: '100%', borderRadius: '8px', border: '1px solid var(--border)', objectFit: 'cover' }} />
-                      <button className="btn-primary" style={{ width: '100%', marginTop: '0.75rem' }}
-                        onClick={() => gradePage(idx)} disabled={page.loading}>
-                        {page.loading
-                          ? <><Loader2 size={16} className="spinner" style={{ marginRight: 6 }} />Analyzing...</>
-                          : <><Sparkles size={16} style={{ marginRight: 6 }} />Analyze Page {idx + 1}</>}
-                      </button>
-                      {page.error && (
-                        <div className="error-box" style={{ marginTop: '0.5rem', fontSize: '0.8rem' }}>
-                          <AlertCircle size={14} style={{ marginRight: 4 }} />{page.error}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Results panel */}
-                    {res && (
-                      <div style={{ flex: 1, minWidth: '260px' }}>
-                    {/* Auto-matched Q badge */}
-                    {res && (
-                      <div style={{ marginBottom: '0.75rem' }}>
-                        {res.auto_matched_question != null ? (
-                          <span style={{
-                            background: 'rgba(0,220,130,0.15)', color: 'var(--success)',
-                            border: '1px solid var(--success)', borderRadius: '20px',
-                            padding: '3px 12px', fontSize: '0.78rem', fontWeight: 600
-                          }}>
-                            🎯 RAG Auto-matched: Q{res.auto_matched_question}
-                          </span>
-                        ) : (
-                          <span style={{
-                            background: 'rgba(255,200,0,0.1)', color: '#f0c040',
-                            border: '1px solid #f0c040', borderRadius: '20px',
-                            padding: '3px 12px', fontSize: '0.78rem', fontWeight: 600
-                          }}>
-                            ⚙️ Manual Rubric Used
-                          </span>
-                        )}
-                      </div>
-                    )}
-                        <div className="score-card" style={{ marginBottom: '1rem', padding: '1rem' }}>
-                          <div className="score-label">Page {idx + 1} Score</div>
-                          <div className="score-value">{displayMarks.toFixed(1)} / {maxMarks}</div>
-                          <div className="score-percent">({maxMarks > 0 ? ((displayMarks / maxMarks) * 100).toFixed(1) : 0}%)</div>
-                        </div>
-
-                        <div className="results-grid">
-                          <ScoreBar label="Keywords" pct={scores.keyword_pct ?? 0} />
-                          <ScoreBar label="Grammar" pct={scores.grammar_pct ?? 0} />
-                          <ScoreBar label="Semantic" pct={scores.semantic_pct ?? 0} />
-                          <ScoreBar label="Presentation" pct={scores.presentation_pct ?? 0} />
-                        </div>
-
-                        {llm.explanation && (
-                          <div className="feedback-box" style={{ marginTop: '1rem' }}>
-                            <div className="feedback-title">🤖 AI Feedback</div>
-                            <div>{llm.explanation}</div>
-                          </div>
-                        )}
-
-                        {/* OCR text expandable */}
-                        <div className="expandable-section" style={{ marginTop: '1rem' }}>
-                          <div className="expandable-header" onClick={() => setShowOcr(p => ({ ...p, [idx]: !p[idx] }))}>
-                            <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                              <FileText size={16} /> Extracted Text (OCR)
-                            </span>
-                            {showOcr[idx] ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-                          </div>
-                          {showOcr[idx] && (
-                            <div className="expandable-content" style={{ whiteSpace: 'pre-wrap', fontSize: '0.85rem' }}>
-                              {res.student_text || 'No text extracted.'}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-
-            {/* Overall summary if multiple pages graded */}
-            {pages.filter(p => p.result).length > 1 && (() => {
-              const graded = pages.filter(p => p.result);
-              const total = graded.reduce((s, p) => {
-                const res = p.result!;
-                const conf = res.composite_confidence ?? 0;
-                const llmM = res.llm_output?.recommended_marks ?? 0;
-                const detM = res.deterministic_recommended_marks ?? 0;
-                return s + ((conf > 0.6 && llmM > 0) ? llmM : detM);
-              }, 0);
-              const max = maxMarks * graded.length;
-              return (
-                <div className="score-card" style={{ marginTop: '1rem' }}>
-                  <div className="score-label">Overall Score ({graded.length} pages graded)</div>
-                  <div className="score-value">{total.toFixed(1)} / {max}</div>
-                  <div className="score-percent">({max > 0 ? ((total / max) * 100).toFixed(1) : 0}%)</div>
-                </div>
-              );
-            })()}
+        {pdfFile && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto', fontSize: '0.85rem', color: 'var(--success)' }}>
+            <CheckCircle2 size={16} /> {pdfFile.name} · {pages.length} pages
           </div>
         )}
-      </main>
+      </header>
+
+      {/* ─── Left Pane: PDF Viewer ──────────────────────────────────────────── */}
+      <div className="left-pane">
+        {/* Toolbar */}
+        {pages.length > 0 && (
+          <div className="pdf-toolbar">
+            <button className="btn-ghost btn-sm" disabled={curIdx === 0}
+              onClick={() => { setCurIdx(i => i - 1); setClosedPopups(new Set()); }}>
+              <ChevronLeft size={16} /> Prev
+            </button>
+            <span style={{ fontSize: '0.85rem', color: 'var(--muted)' }}>Page {curIdx + 1} of {pages.length}</span>
+            <button className="btn-ghost btn-sm" disabled={curIdx === pages.length - 1}
+              onClick={() => { setCurIdx(i => i + 1); setClosedPopups(new Set()); }}>
+              Next <ChevronRight size={16} />
+            </button>
+          </div>
+        )}
+
+        {/* View Area */}
+        <div className="pdf-view-area">
+          {!pdfFile ? (
+            <div className="drop-zone"
+              onDragOver={e => e.preventDefault()}
+              onDrop={e => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) handleStudentPdf(f); }}
+              onClick={() => studentPdfRef.current?.click()}>
+              <UploadCloud size={52} color="var(--primary)" style={{ marginBottom: 12 }} />
+              <h3 style={{ marginBottom: '0.5rem' }}>Drop Student PDF here</h3>
+              <p style={{ color: 'var(--muted)', fontSize: '0.85rem' }}>or click to browse</p>
+              <input type="file" ref={studentPdfRef} accept=".pdf,.jpg,.png" style={{ display: 'none' }}
+                onChange={e => { const f = e.target.files?.[0]; if (f) handleStudentPdf(f); }} />
+            </div>
+          ) : currPage ? (
+            <>
+              <img src={currPage.url} className="pdf-img" alt={`Page ${curIdx + 1}`} />
+
+              {/* Per-answer floating popups, positioned by y_pct */}
+              {currPage.results.map((r, ri) => {
+                const key = popupKey(curIdx, r.q_label);
+                if (closedPopups.has(key)) return null;
+                const topPct = Math.max(2, Math.min(r.y_pct * 100, 55));
+                const stackOffset = ri * 5;
+                return (
+                  <AnswerPopup
+                    key={key}
+                    res={r}
+                    top={`${Math.min(topPct + stackOffset, 70)}%`}
+                    onClose={() => setClosedPopups(prev => new Set([...prev, key]))}
+                    onSelect={() => setActiveResult(r)}
+                    qaDataset={qaDataset}
+                    manualQNum={manualOverrides[r.q_label] ?? null}
+                    onManualSelect={n => setManualOverrides(prev => ({ ...prev, [r.q_label]: n }))}
+                  />
+                );
+              })}
+            </>
+          ) : null}
+        </div>
+
+        {/* OCR Text Accordion */}
+        {currPage && currPage.results.length > 0 && (
+          <div style={{ padding: '0 1rem', flexShrink: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', padding: '0.4rem 0', border: 'none', background: 'transparent', color: 'var(--muted)', fontSize: '0.8rem' }}
+              onClick={() => setShowOcr(v => !v)}>
+              <span>📄 Extracted OCR Text</span>
+              {showOcr ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+            </div>
+            {showOcr && <div className="ocr-box">{currPage.results[0].full_page_text || 'No text extracted.'}</div>}
+          </div>
+        )}
+
+        {/* Error */}
+        {currPage?.error && (
+          <div className="error-box" style={{ margin: '0 1rem 0.5rem' }}>
+            <AlertCircle size={14} style={{ marginRight: 4 }} />{currPage.error}
+          </div>
+        )}
+
+        {/* Analyze Button */}
+        {pages.length > 0 && (
+          <button className="analyze-btn" onClick={gradeCurrentPage} disabled={currPage?.loading}>
+            {currPage?.loading ? <><Loader2 size={18} className="spinner" />AI is evaluating...</> : <><Sparkles size={18} />Analyze Page {curIdx + 1}</>}
+          </button>
+        )}
+
+        {/* Thumbnail Strip */}
+        {pages.length > 1 && (
+          <div className="thumb-strip">
+            {pages.map((p, i) => (
+              <div key={i} className={`thumb ${i === curIdx ? 'active' : ''}`}
+                onClick={() => { setCurIdx(i); setClosedPopups(new Set()); }}>
+                <img src={p.url} alt={`pg ${i + 1}`} />
+                <span className="thumb-label">pg {i + 1}</span>
+                {p.results.length > 0 && <span className="thumb-graded" />}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ─── Right Pane ──────────────────────────────────────────────────────── */}
+      <div className="right-pane">
+
+        {/* Solutions */}
+        <div className="right-section">
+          <div className="panel-title"><BookOpen size={16} />Solutions for trained model</div>
+          <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: '0.75rem', color: 'var(--muted)', marginBottom: '3px' }}>Questions PDF</div>
+              <input type="file" ref={qPdfRef} accept=".pdf" style={{ display: 'none' }} />
+              <button className="btn-ghost btn-sm" style={{ width: '100%' }} onClick={() => qPdfRef.current?.click()}>
+                {qPdfRef.current?.files?.[0]?.name ?? 'Choose…'}
+              </button>
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: '0.75rem', color: 'var(--muted)', marginBottom: '3px' }}>Answer Key PDF</div>
+              <input type="file" ref={aPdfRef} accept=".pdf" style={{ display: 'none' }} />
+              <button className="btn-ghost btn-sm" style={{ width: '100%' }} onClick={() => aPdfRef.current?.click()}>
+                {aPdfRef.current?.files?.[0]?.name ?? 'Choose…'}
+              </button>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'flex-end' }}>
+              <button className="btn-sm" onClick={handleLoadQA} disabled={loadingQA}>
+                {loadingQA ? <Loader2 size={14} className="spinner" /> : 'Extract'}
+              </button>
+            </div>
+          </div>
+          {qaDataset.length > 0 && <div style={{ fontSize: '0.8rem', color: 'var(--success)' }}><CheckCircle2 size={13} style={{ marginRight: 4 }} />{qaDataset.length} questions parsed — auto-grading enabled</div>}
+          {qaError && <div className="error-box">{qaError}</div>}
+        </div>
+
+        {/* Rubric Section */}
+        <div className="right-section">
+          <div className="panel-title">📋 Rubric</div>
+
+          {/* If a graded answer is selected, show its matched rubric */}
+          {activeResult ? (
+            <RubricPanel
+              activeResult={activeResult}
+              qaDataset={qaDataset}
+              manualOverrides={manualOverrides}
+              setManualOverrides={setManualOverrides}
+              onBack={() => setActiveResult(null)}
+            />
+          ) : (
+            <div>
+              <p style={{ fontSize: '0.78rem', color: 'var(--muted)', marginBottom: '0.75rem' }}>
+                {qaDataset.length > 0
+                  ? 'Click a popup to preview its rubric, or override manually below.'
+                  : 'Enter rubric manually since no Q&A dataset is loaded.'}
+              </p>
+              <div className="form-group">
+                <label>Reference Answer</label>
+                <textarea rows={2} value={refLong} onChange={e => setRefLong(e.target.value)} />
+              </div>
+              <div style={{ display: 'flex', gap: '0.6rem' }}>
+                <div className="form-group" style={{ flex: 2 }}>
+                  <label>Keywords</label>
+                  <input value={keywords} onChange={e => setKeywords(e.target.value)} />
+                </div>
+                <div className="form-group" style={{ flex: 1 }}>
+                  <label>Max Marks</label>
+                  <input type="number" value={maxMarks} onChange={e => setMaxMarks(Number(e.target.value))} />
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Score Grid */}
+        <div className="right-section" style={{ flex: 1 }}>
+          <div className="panel-title">📊 Answer Score from Model</div>
+          <p style={{ fontSize: '0.75rem', color: 'var(--warning)', marginBottom: '0.5rem' }}>* Editable for the teacher</p>
+          {Object.keys(editableScores).length === 0 ? (
+            <p style={{ fontSize: '0.85rem', color: 'var(--muted)', fontStyle: 'italic', marginTop: '1rem', textAlign: 'center' }}>Analyze a page to generate scores…</p>
+          ) : (
+            <table className="score-table">
+              <thead>
+                <tr>
+                  {Object.keys(editableScores).map(k => <th key={k}>{k}</th>)}
+                  <th style={{ color: 'var(--primary)' }}>Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  {Object.entries(editableScores).map(([k, v]) => (
+                    <td key={k}>
+                      <input type="number" className="score-cell" value={v} step={0.5}
+                        onChange={e => setEditableScores(prev => ({ ...prev, [k]: parseFloat(e.target.value) || 0 }))} />
+                    </td>
+                  ))}
+                  <td style={{ fontWeight: 800, fontSize: '1.3rem', color: 'var(--success)' }}>
+                    {Object.values(editableScores).reduce((a, b) => a + b, 0).toFixed(1)}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

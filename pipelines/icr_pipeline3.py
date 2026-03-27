@@ -289,13 +289,95 @@ def remove_ruled_lines(img_bgr) -> object:
 def clean_ocr_noise(text: str) -> str:
     """Strip out patterns that come from ruled lines being misread by OCR."""
     import re as _re
-    # Remove 3+ repeated non-alphanumeric characters (e.g., '___', '...', '===', "'''", '---')
     text = _re.sub(r'([^\w\s]){3,}', ' ', text)
-    # Remove isolated single non-alphanumeric tokens
+    text = _re.sub(r'([.,\'"`_^=-]\s+){2,}', ' ', text)
     text = _re.sub(r'\s[^\w\s]{1,2}\s', ' ', text)
-    # Collapse whitespace
+    text = _re.sub(r'(?<=\s)[\'"`_]+|[\'"`_]+(?=\s)', ' ', text)
     text = _re.sub(r'\s+', ' ', text).strip()
     return text
+
+
+def preprocess_for_ocr(img_bgr):
+    """Full preprocessing chain: CLAHE contrast boost + ruled-line removal.
+    Returns a clean, high-contrast BGR image ready for EasyOCR."""
+    import tempfile
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    # Step 1: CLAHE Adaptive Histogram Equalization to boost faded ink contrast
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+    gray = clahe.apply(gray)
+    # Step 2: Convert back to BGR color for ruled-line removal
+    img_clahe = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    # Step 3: Morphological ruled-line removal
+    img_clean = remove_ruled_lines(img_clahe)
+    return img_clean
+
+
+DEFAULT_Q_PATTERN = re.compile(
+    r'(?:^|\s)(?:(\d{1,2})([ab]?)\)|(?:\()(\d{1,2})[ab]?(?:\)))',
+    re.IGNORECASE | re.MULTILINE
+)
+
+def split_text_by_question(blocks: list) -> list:
+    """Given OCR blocks (each with a 'text' and 'y' centroid), split into segments
+    whenever a question number pattern is detected. Returns a list of dicts:
+      { 'q_label': '16', 'text': '...full answer text...', 'y_pct': 0.35 }
+    If no question numbers detected, returns one segment covering the whole page."""
+    # Regex: matches patterns like "16)", "16a)", "(16)", "(16a)"
+    Q_PAT = re.compile(r'(?:^|(?<=\s))(?:(\d{1,3})([ab]?)[)\]]|\((\d{1,3})[ab]?[)\]])')
+    
+    segments = []
+    current_label = None
+    current_lines = []
+    current_y = 0.0
+    first_block_y = None
+    last_block_y = 1.0
+
+    if blocks:
+        ys = [b.get('y', 0) for b in blocks]
+        first_block_y = min(ys) if ys else 0
+        last_block_y = max(ys) if ys else 1
+        height_range = max(last_block_y - first_block_y, 1)
+
+    for block in blocks:
+        text = block.get('text', '').strip()
+        y = block.get('y', 0)
+        # Calculate relative y position on the page (0.0 = top, 1.0 = bottom)
+        y_pct = (y - first_block_y) / (last_block_y - first_block_y + 1) if blocks else 0
+        
+        match = Q_PAT.search(text)
+        if match:
+            # Save previous segment
+            if current_lines:
+                segments.append({
+                    'q_label': current_label or 'full',
+                    'text': clean_ocr_noise(' '.join(current_lines)),
+                    'y_pct': current_y
+                })
+            # Start new segment with the matched question number
+            q_num = match.group(1) or match.group(3)
+            q_sub = match.group(2) or ''
+            current_label = f"{q_num}{q_sub}"
+            current_y = y_pct
+            # Keep the rest of the line after the question number marker
+            rest = text[match.end():].strip()
+            current_lines = [rest] if rest else []
+        else:
+            current_lines.append(text)
+
+    # Flush last segment
+    if current_lines:
+        segments.append({
+            'q_label': current_label or 'full',
+            'text': clean_ocr_noise(' '.join(current_lines)),
+            'y_pct': current_y
+        })
+
+    # If nothing was detected, return single segment with all text
+    if not segments:
+        all_text = clean_ocr_noise(' '.join(b.get('text', '') for b in blocks))
+        return [{'q_label': 'full', 'text': all_text, 'y_pct': 0.0}]
+
+    return segments
 
 def deskew_image(img_gray):
     try:
@@ -632,21 +714,24 @@ Write a short feedback comment (2-3 sentences) to the student.
 
 # ---------------- Pipeline Orchestrator ----------------
 
-def evaluate_from_image(image_path: str, question: str, reference: Dict, debug_save_image: bool = False) -> Dict:
+def evaluate_from_image(image_path: str, question: str, reference: Dict, debug_save_image: bool = False,
+                        qa_dataset: list = None, manual_q_overrides: dict = None) -> list:
+    """Evaluate student answers from an image. Returns a LIST of result dicts,
+    one per detected question-answer on the page. Uses the full qa_dataset when available
+    so it can automatically pick the correct rubric for each detected answer."""
     print(f"\n--- Processing {os.path.basename(image_path)} ---")
     
-    # 0. Pre-processing: Remove ruled lines (DISABLED — enable when ready to test)
-    # raw_img = cv2.imread(image_path)
-    # if raw_img is not None:
-    #     cleaned_img = remove_ruled_lines(raw_img)
-    #     import tempfile
-    #     tmp_cleaned = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
-    #     cv2.imwrite(tmp_cleaned.name, cleaned_img)
-    #     tmp_cleaned.close()
-    #     ocr_source_path = tmp_cleaned.name
-    # else:
-    #     ocr_source_path = image_path
-    ocr_source_path = image_path  # Use raw image for now
+    # 0. Pre-processing: CLAHE contrast boost + ruled-line removal
+    raw_img = cv2.imread(image_path)
+    if raw_img is not None:
+        cleaned_img = preprocess_for_ocr(raw_img)
+        import tempfile
+        tmp_cleaned = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
+        cv2.imwrite(tmp_cleaned.name, cleaned_img)
+        tmp_cleaned.close()
+        ocr_source_path = tmp_cleaned.name
+    else:
+        ocr_source_path = image_path
     
     # 1. OCR Stage
     print("Stage 1: OCR")
@@ -663,71 +748,155 @@ def evaluate_from_image(image_path: str, question: str, reference: Dict, debug_s
     
     blocks = merge_nearby_horizontal_blocks(blocks)
     paras = coalesce_blocks(blocks)
-    student_text = " ".join([p["text"] for p in paras])
-    # Post-process: scrub any remaining ruled-line OCR artifacts
-    student_text = clean_ocr_noise(student_text)
-    avg_ocr = np.mean([p.get("conf",0) for p in paras]) if paras else 0.0
-    print(f"OCR Text ({len(student_text)} chars): {student_text[:100]}...")
 
-    # 2. Semantic Stage
-    print("Stage 2: Semantic Analysis")
-    sent_model = MM.load_sentence_transformer()
-    s_score = semantic_score(student_text, [reference.get("reference_long", "")], sent_model)
-    MM.unload_sentence_transformer(sent_model)
+    full_student_text = clean_ocr_noise(" ".join([p["text"] for p in paras]))
+    avg_ocr = np.mean([p.get("conf", 0) for p in paras]) if paras else 0.0
+    print(f"OCR Text ({len(full_student_text)} chars): {full_student_text[:100]}...")
 
-    # 3. Grammar Stage
-    print("Stage 3: Grammar Analysis")
-    g_tok, g_mod = MM.load_grammar_model()
-    g_score = grammar_score_model(student_text, g_tok, g_mod)
-    MM.unload_grammar_model(g_tok, g_mod)
+    # ── Multi-Answer Splitting ──────────────────────────────────────────────
+    segments = split_text_by_question(paras)
+    print(f"[MultiAnswer] {len(segments)} segment(s) detected")
 
-    # 4. Deterministic Scores (No model needed)
-    k_score = keyword_score(student_text, reference.get("keywords", []))
-    c_score = content_coverage_score(student_text, reference.get("reference_short", []))
-    p_score = presentation_score(student_text)
-    
-    final_pct = 0.3*k_score + 0.4*s_score + 0.15*g_score + 0.10*c_score + 0.05*p_score
-    rec_marks = final_pct / 100.0 * reference.get("max_marks", 10)
+    # ── Auto-Rubric via SentenceTransformer for ALL segments ───────────────
+    matched_rubrics = {}
+    if qa_dataset:
+        import gc as _gc
+        from sentence_transformers import SentenceTransformer as _ST, util as _stu
+        _gc.collect()
+        if torch.cuda.is_available(): torch.cuda.empty_cache()
 
-    # 5. LLM Stage
-    print("Stage 4: LLM Grading")
-    llm_tok, llm_mod = MM.load_llm()
-    llm_out = llm_grade(
-        question, 
-        reference.get("reference_short", []), 
-        reference.get("reference_long", ""), 
-        student_text, 
-        llm_tok, 
-        llm_mod
-    )
-    MM.unload_llm(llm_tok, llm_mod)
+        # Apply manual overrides first (no semantic search needed for these)
+        override_map = manual_q_overrides or {}
+        segs_needing_rag = []
+        for seg in segments:
+            q_label = seg["q_label"]
+            if q_label in override_map:
+                forced_num = override_map[q_label]
+                forced_item = next((it for it in qa_dataset if it["number"] == forced_num), None)
+                if forced_item:
+                    seg["auto_matched_q"] = forced_item["number"]
+                    seg["rag_confidence"] = 1.0  # teacher override = perfect confidence
+                    matched_rubrics[q_label] = {
+                        "question": forced_item["question"],
+                        "reference": forced_item["rubric"]
+                    }
+                    print(f"[MANUAL] '{q_label}' -> Q{forced_item['number']} (teacher override)")
+                    continue  # skip RAG for this segment
+            segs_needing_rag.append(seg)
 
-    # Combine results
-    if llm_out and isinstance(llm_out, dict) and "recommended_marks" in llm_out:
-        l_marks = float(llm_out["recommended_marks"])
-        conf = 1.0 - abs(l_marks - rec_marks)/10.0
-    else:
-        conf = 0.0
-        llm_out = {"explanation": "LLM failed or fallback used", "raw_output": str(llm_out)}
+        if segs_needing_rag:
+            sent_model = MM.load_sentence_transformer()
+            for seg in segs_needing_rag:
+                st = seg["text"]
+                if not st.strip():
+                    continue
+                se = sent_model.encode(st, convert_to_tensor=True)
+                best, best_item = -1.0, None
+                for item in qa_dataset:
+                    combined = f"{item.get('question','')} {item.get('answer','')}"
+                    re_emb = sent_model.encode(combined, convert_to_tensor=True)
+                    from sentence_transformers import util as _stu
+                    sc = float(_stu.cos_sim(se, re_emb)[0][0])
+                    if sc > best:
+                        best = sc
+                        best_item = item
+                seg["auto_matched_q"] = best_item["number"] if (best_item and best > 0.10) else None
+                seg["rag_confidence"] = best
+                if best_item and best > 0.10:
+                    matched_rubrics[seg["q_label"]] = {
+                        "question": best_item["question"],
+                        "reference": best_item["rubric"]
+                    }
+                    print(f"[RAG] '{seg['q_label']}' -> Q{best_item['number']} ({best:.3f})")
+            MM.unload_sentence_transformer(sent_model)
+        _gc.collect()
+        if torch.cuda.is_available(): torch.cuda.empty_cache()
 
-    composite = 0.4*(avg_ocr/100.0) + 0.4*(s_score/100.0) + 0.2*conf
-    
-    res = {
-        "image_path": image_path,
-        "student_text": student_text,
-        "avg_ocr_conf": avg_ocr,
-        "component_scores": {
-            "keyword_pct": k_score, "semantic_pct": s_score, 
-            "grammar_pct": g_score, "coverage_pct": c_score, "presentation_pct": p_score
-        },
-        "deterministic_final_pct": final_pct,
-        "deterministic_recommended_marks": rec_marks,
-        "llm_output": llm_out,
-        "composite_confidence": composite
-    }
-    return res
+    # ── Grade Each Segment Sequentially ────────────────────────────────────
+    all_results = []
+    for seg in segments:
+        seg_text = seg["text"]
+        if not seg_text.strip():
+            continue
+        q_label = seg["q_label"]
+        y_pct = seg["y_pct"]
+
+        if q_label in matched_rubrics:
+            seg_question = matched_rubrics[q_label]["question"]
+            seg_reference = matched_rubrics[q_label]["reference"]
+        else:
+            seg_question = question
+            seg_reference = reference
+
+        # Semantic
+        sent_model = MM.load_sentence_transformer()
+        s_score = semantic_score(seg_text, [seg_reference.get("reference_long", "")], sent_model)
+        MM.unload_sentence_transformer(sent_model)
+
+        # Grammar
+        g_tok, g_mod = MM.load_grammar_model()
+        g_score = grammar_score_model(seg_text, g_tok, g_mod)
+        MM.unload_grammar_model(g_tok, g_mod)
+
+        # Deterministic
+        k_score = keyword_score(seg_text, seg_reference.get("keywords", []))
+        c_score = content_coverage_score(seg_text, seg_reference.get("reference_short", []))
+        p_score = presentation_score(seg_text)
+        max_m = seg_reference.get("max_marks", reference.get("max_marks", 10))
+        final_pct = 0.3 * k_score + 0.4 * s_score + 0.15 * g_score + 0.10 * c_score + 0.05 * p_score
+        rec_marks = final_pct / 100.0 * max_m
+
+        # LLM
+        llm_tok, llm_mod = MM.load_llm()
+        llm_out = llm_grade(seg_question, seg_reference.get("reference_short", []),
+                            seg_reference.get("reference_long", ""), seg_text, llm_tok, llm_mod)
+        MM.unload_llm(llm_tok, llm_mod)
+
+        if llm_out and isinstance(llm_out, dict) and "recommended_marks" in llm_out:
+            l_marks = float(llm_out.get("recommended_marks", 0))
+            conf = max(0.0, 1.0 - abs(l_marks - rec_marks) / max(max_m, 1))
+        else:
+            conf = 0.0
+            llm_out = {"explanation": "LLM failed.", "recommended_marks": 0}
+
+        composite = 0.4 * (avg_ocr / 100.0) + 0.4 * (s_score / 100.0) + 0.2 * conf
+
+        all_results.append({
+            "q_label": q_label,
+            "y_pct": y_pct,
+            "auto_matched_question": seg.get("auto_matched_q"),
+            "rag_confidence": seg.get("rag_confidence"),
+            "student_text": seg_text,
+            "full_page_text": full_student_text,
+            "avg_ocr_conf": avg_ocr,
+            "component_scores": {
+                "keyword_pct": k_score, "semantic_pct": s_score,
+                "grammar_pct": g_score, "coverage_pct": c_score, "presentation_pct": p_score
+            },
+            "deterministic_final_pct": final_pct,
+            "deterministic_recommended_marks": rec_marks,
+            "llm_output": llm_out,
+            "composite_confidence": composite,
+            "image_path": image_path,
+            "matched_question_text": seg_question,
+            "rubric": seg_reference,
+        })
+
+    if not all_results:
+        all_results.append({
+            "q_label": "full", "y_pct": 0.0, "auto_matched_question": None,
+            "student_text": full_student_text, "full_page_text": full_student_text,
+            "avg_ocr_conf": avg_ocr, "component_scores": {},
+            "deterministic_recommended_marks": 0,
+            "llm_output": {"explanation": "No text found on page.", "recommended_marks": 0},
+            "composite_confidence": 0, "image_path": image_path,
+            "matched_question_text": "", "rubric": reference,
+        })
+
+    return all_results
 
 if __name__ == "__main__":
+
     # Test
     examples_dir = os.path.join(os.path.dirname(__file__), "..", "examples")
     img_path = os.path.join(examples_dir, "sample4.jpg")
