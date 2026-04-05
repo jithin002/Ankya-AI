@@ -121,30 +121,99 @@ async def generate_rubric(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _parse_numbered_text(pdf_text_pages):
-    """Extract numbered items from PDF text pages into {number: text} dict."""
+def _parse_numbered_text(pdf_text_pages: list) -> dict:
+    """
+    Extract numbered items from PDF text pages into {number: text} dict.
+    Supports formats: '1. text', '1) text', 'Q1. text', 'Q1: text', '1: text'
+    """
     result = {}
+    # Matches: 1. | 1) | Q1. | Q1: | 1: at start of line (after optional whitespace)
+    Q_LINE_RE = re.compile(
+        r'^\s*(?:Q|q)?\s*(\d{1,3})\s*[.):\]]\s*(.*)', re.IGNORECASE
+    )
     for page_text in pdf_text_pages:
+        if not page_text.strip():
+            continue
         lines = page_text.split("\n")
         current_q = None
         current_text = []
         for line in lines:
-            line = line.strip()
-            if line and line[0].isdigit() and '.' in line[:4]:
+            m = Q_LINE_RE.match(line)
+            if m:
                 if current_q is not None:
                     result[current_q] = "\n".join(current_text).strip()
-                try:
-                    num_str, rest = line.split('.', 1)
-                    current_q = int(num_str.strip())
-                    current_text = [rest.strip()]
-                except:
-                    continue
+                current_q = int(m.group(1))
+                current_text = [m.group(2).strip()] if m.group(2).strip() else []
             else:
-                if current_q is not None:
-                    current_text.append(line)
+                if current_q is not None and line.strip():
+                    current_text.append(line.strip())
         if current_q is not None:
             result[current_q] = "\n".join(current_text).strip()
     return result
+
+
+def _ocr_pdf_bytes_to_text_pages(pdf_bytes: bytes) -> list:
+    """
+    Render each PDF page as an image and run EasyOCR on it.
+    Used when fitz.get_text() returns empty (scanned PDFs).
+    Handles 2-column layouts by splitting page vertically and reading each half.
+    Returns a list of strings, one per page.
+    """
+    import fitz
+    import numpy as np
+    import cv2
+    import easyocr
+
+    reader = easyocr.Reader(['en'], gpu=False)  # CPU-only, lightweight for PDFs
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    pages_text = []
+
+    for page in doc:
+        # Render at 200 DPI for good OCR accuracy
+        pix = page.get_pixmap(dpi=200)
+        img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+            pix.height, pix.width, pix.n
+        )
+        # Convert to BGR for OpenCV
+        if pix.n == 4:
+            img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGR)
+        elif pix.n == 3:
+            img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        else:
+            img_bgr = img_array
+
+        H, W = img_bgr.shape[:2]
+
+        # ── 2-column layout: split at midpoint and read each half separately ──
+        # Detect if content is split in two columns by checking text density per half
+        left_half  = img_bgr[:, :W//2]
+        right_half = img_bgr[:, W//2:]
+
+        def ocr_region(region):
+            results = reader.readtext(region, detail=1)
+            # Sort by Y then X so text flows naturally
+            results_sorted = sorted(results, key=lambda r: (r[0][0][1], r[0][0][0]))
+            return "\n".join([text for _, text, conf in results_sorted if conf > 0.3])
+
+        left_text  = ocr_region(left_half).strip()
+        right_text = ocr_region(right_half).strip()
+
+        # Heuristic: if both halves have meaningful content, treat as 2-column
+        if len(left_text) > 50 and len(right_text) > 50:
+            page_text = left_text + "\n" + right_text
+        elif len(left_text) > len(right_text):
+            # Single column on the left / full page – re-run on full image
+            full_results = reader.readtext(img_bgr, detail=1)
+            full_sorted  = sorted(full_results, key=lambda r: (r[0][0][1], r[0][0][0]))
+            page_text = "\n".join([t for _, t, c in full_sorted if c > 0.3])
+        else:
+            full_results = reader.readtext(img_bgr, detail=1)
+            full_sorted  = sorted(full_results, key=lambda r: (r[0][0][1], r[0][0][0]))
+            page_text = "\n".join([t for _, t, c in full_sorted if c > 0.3])
+
+        pages_text.append(page_text)
+
+    return pages_text
 
 
 @app.post("/parse-qa-documents/")
@@ -154,30 +223,44 @@ async def parse_qa_documents(
     max_marks_per_question: int = Form(10)
 ):
     """
-    Accepts a Questions PDF and an Answer Key PDF.
-    Extracts numbered Q&A pairs matched by number, returns a qa_dataset
-    list with embedded rubrics ready for page-by-page grading in the frontend.
+    Accepts a Questions PDF and an Answer Key PDF (digital or scanned).
+    Extracts numbered Q&A pairs matched by number, returns a qa_dataset list
+    with embedded rubrics ready for per-page grading in the frontend.
+
+    Handles scanned PDFs automatically via EasyOCR fallback.
+    Handles 2-column layouts by splitting page images vertically.
     """
-    import fitz, re
-    
-    def pdf_to_text_pages(content: bytes):
+    import fitz
+
+    def pdf_to_text_pages(content: bytes) -> list:
+        """Try digital text layer first; fall back to OCR if blank."""
         doc = fitz.open(stream=content, filetype="pdf")
-        return [page.get_text().strip() for page in doc]
+        pages = [page.get_text().strip() for page in doc]
+        total_chars = sum(len(p) for p in pages)
+        if total_chars < 50:
+            # Scanned PDF: use EasyOCR
+            print("[parse-qa] Digital text layer is empty – switching to OCR fallback")
+            return _ocr_pdf_bytes_to_text_pages(content)
+        return pages
 
     q_bytes = await questions_pdf.read()
     a_bytes = await answers_pdf.read()
 
     questions_map = _parse_numbered_text(pdf_to_text_pages(q_bytes))
-    answers_map = _parse_numbered_text(pdf_to_text_pages(a_bytes))
+    answers_map   = _parse_numbered_text(pdf_to_text_pages(a_bytes))
+
+    # If questions PDF also came back blank, try using answers as both Q and A
+    if not questions_map and answers_map:
+        questions_map = {k: f"Question {k}" for k in answers_map}
 
     qa_dataset = []
     for num in sorted(questions_map.keys()):
         q_text = questions_map[num]
         a_text = answers_map.get(num, "")
         section = "A" if num <= 15 else "B" if num <= 22 else "C" if num <= 31 else "D"
-        
+
         words = re.findall(r"[A-Za-z]{4,}", a_text)
-        freq = {}
+        freq: dict = {}
         for w in words:
             freq[w.lower()] = freq.get(w.lower(), 0) + 1
         keywords = [w for w, _ in sorted(freq.items(), key=lambda x: -x[1])[:6]]

@@ -255,24 +255,40 @@ export default function App() {
 
   const handleStudentPdf = useCallback(async (file: File) => {
     setPdfFile(file); setPages([]); setCurIdx(0); setClosedPopups(new Set());
+
+    // Check if the file is an image (not a PDF) — handle it directly as a single page
+    const isImage = /\.(jpe?g|png|bmp|gif|webp|tiff?)$/i.test(file.name) ||
+                    file.type.startsWith('image/');
+    if (isImage) {
+      setPages([{ pageIndex: 0, blob: file, url: URL.createObjectURL(file), results: [], loading: false, error: null }]);
+      return;
+    }
+
+    // For PDFs, use pdfjsLib to render each page as an image
     const pdfjsLib = (window as any).pdfjsLib;
     if (!pdfjsLib) {
       setPages([{ pageIndex: 0, blob: file, url: URL.createObjectURL(file), results: [], loading: false, error: null }]);
       return;
     }
-    const buffer = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
-    const entries: PageEntry[] = [];
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const page = await pdf.getPage(i);
-      const viewport = page.getViewport({ scale: 1.5 });
-      const canvas = document.createElement('canvas');
-      canvas.width = viewport.width; canvas.height = viewport.height;
-      await page.render({ canvasContext: canvas.getContext('2d')!, viewport }).promise;
-      const blob = await new Promise<Blob>(res => canvas.toBlob(b => res(b!), 'image/jpeg', 0.92));
-      entries.push({ pageIndex: i - 1, blob, url: URL.createObjectURL(blob), results: [], loading: false, error: null });
+    try {
+      const buffer = await file.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+      const entries: PageEntry[] = [];
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const viewport = page.getViewport({ scale: 1.5 });
+        const canvas = document.createElement('canvas');
+        canvas.width = viewport.width; canvas.height = viewport.height;
+        await page.render({ canvasContext: canvas.getContext('2d')!, viewport }).promise;
+        const blob = await new Promise<Blob>(res => canvas.toBlob(b => res(b!), 'image/jpeg', 0.92));
+        entries.push({ pageIndex: i - 1, blob, url: URL.createObjectURL(blob), results: [], loading: false, error: null });
+      }
+      setPages(entries);
+    } catch (err) {
+      console.error('PDF parsing failed:', err);
+      // Fallback: treat the file as a single page
+      setPages([{ pageIndex: 0, blob: file, url: URL.createObjectURL(file), results: [], loading: false, error: null }]);
     }
-    setPages(entries);
   }, []);
 
   const gradeCurrentPage = async () => {
@@ -364,8 +380,8 @@ export default function App() {
               onDrop={e => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) handleStudentPdf(f); }}
               onClick={() => studentPdfRef.current?.click()}>
               <UploadCloud size={52} color="var(--primary)" style={{ marginBottom: 12 }} />
-              <h3 style={{ marginBottom: '0.5rem' }}>Drop Student PDF here</h3>
-              <p style={{ color: 'var(--muted)', fontSize: '0.85rem' }}>or click to browse</p>
+              <h3 style={{ marginBottom: '0.5rem' }}>Drop Student PDF or Image here</h3>
+              <p style={{ color: 'var(--muted)', fontSize: '0.85rem' }}>Supports PDF, JPG, PNG — click to browse</p>
               <input type="file" ref={studentPdfRef} accept=".pdf,.jpg,.png" style={{ display: 'none' }}
                 onChange={e => { const f = e.target.files?.[0]; if (f) handleStudentPdf(f); }} />
             </div>

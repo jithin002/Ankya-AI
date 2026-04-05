@@ -209,17 +209,17 @@ def recognize_with_trocr_per_line(image_path: str, easyocr_blocks: List[Dict], t
     # 1) Merge nearby horizontal pieces
     merged = merge_nearby_horizontal_blocks(easyocr_blocks, gap_thresh=30)
 
-    # 2) Heuristics: remove tiny boxes
+    # 2) Heuristics: remove tiny boxes (relaxed – handwriting near margins is valid)
     filtered = []
-    min_area = max(200, 0.002 * (W * H))
-    top_margin = 0.03 * H
-    bottom_margin = 0.97 * H
+    min_area = max(80, 0.0005 * (W * H))  # was 200/0.002 – relaxed to catch small circled numbers
+    top_margin = 0.01 * H                  # was 0.03 – allow text very near top edge
+    bottom_margin = 0.99 * H              # was 0.97 – allow text very near bottom edge
     for b in merged:
         x, y, w, h = b['bbox']
         area = w * h
         if area < min_area: continue
         if y < top_margin or (y + h) > bottom_margin:
-            if not (w > 0.6 * W and h > 0.02 * H): continue
+            if not (w > 0.4 * W and h > 0.01 * H): continue  # was 0.6W/0.02H
         filtered.append(b)
 
     filtered = sorted(filtered, key=lambda x: x['bbox'][1])
@@ -297,6 +297,19 @@ def clean_ocr_noise(text: str) -> str:
     return text
 
 
+# ── Encircled digit normaliser ────────────────────────────────────────────────
+# OCR engines often produce ① ② ③ (Unicode Enclosed Alphanumerics) for circled
+# handwritten question numbers.  Map them to "1) " so the question-splitter
+# regex can detect segment boundaries reliably.
+_ENCIRCLED_DIGITS = {chr(9312 + i): str(i + 1) for i in range(20)}  # ①→1 … ⑳→20
+
+def normalize_encircled_digits(text: str) -> str:
+    """Replace circled-digit unicode chars with plain-digit equivalents."""
+    for ch, digit in _ENCIRCLED_DIGITS.items():
+        text = text.replace(ch, f' {digit}) ')
+    return text
+
+
 def preprocess_for_ocr(img_bgr):
     """Full preprocessing chain: CLAHE contrast boost + ruled-line removal.
     Returns a clean, high-contrast BGR image ready for EasyOCR."""
@@ -321,10 +334,25 @@ def split_text_by_question(blocks: list) -> list:
     """Given OCR blocks (each with a 'text' and 'y' centroid), split into segments
     whenever a question number pattern is detected. Returns a list of dicts:
       { 'q_label': '16', 'text': '...full answer text...', 'y_pct': 0.35 }
-    If no question numbers detected, returns one segment covering the whole page."""
-    # Regex: matches patterns like "16)", "16a)", "(16)", "(16a)"
-    Q_PAT = re.compile(r'(?:^|(?<=\s))(?:(\d{1,3})([ab]?)[)\]]|\((\d{1,3})[ab]?[)\]])')
-    
+    If no question numbers detected, returns one segment covering the whole page.
+
+    Recognised patterns (start-of-text or after whitespace):
+      classic:   1)  (1)  [1]
+      dotted:    1.  Q1.  Q1:
+      written:   Q1  Q1:  question 1
+      encircled: ①  ②  (already normalised to '1) ' by normalize_encircled_digits)
+    """
+    # Expanded pattern – covers: 1) (1) [1] 1. Q1 Q1. Q1: question1
+    Q_PAT = re.compile(
+        r'(?:(?:^|(?<=\s))'
+        r'(?:'
+        r'(?:Q|q|question\s*)(\d{1,3})([ab]?)[:\.]?'   # Q1  Q1. Q1:  question1
+        r'|(?:\()(\d{1,3})([ab]?)[\)\]]'               # (1)  [1]
+        r'|(\d{1,3})([ab]?)[\)\]]'                      # 1)  1]
+        r'|(\d{1,3})([ab]?)\.(?=\s)'                    # 1.  (dot followed by space)
+        r'))'
+    )
+
     segments = []
     current_label = None
     current_lines = []
@@ -336,14 +364,14 @@ def split_text_by_question(blocks: list) -> list:
         ys = [b.get('y', 0) for b in blocks]
         first_block_y = min(ys) if ys else 0
         last_block_y = max(ys) if ys else 1
-        height_range = max(last_block_y - first_block_y, 1)
 
     for block in blocks:
-        text = block.get('text', '').strip()
+        raw_text = block.get('text', '').strip()
+        # Normalise encircled digits BEFORE regex matching
+        text = normalize_encircled_digits(raw_text)
         y = block.get('y', 0)
-        # Calculate relative y position on the page (0.0 = top, 1.0 = bottom)
         y_pct = (y - first_block_y) / (last_block_y - first_block_y + 1) if blocks else 0
-        
+
         match = Q_PAT.search(text)
         if match:
             # Save previous segment
@@ -353,12 +381,11 @@ def split_text_by_question(blocks: list) -> list:
                     'text': clean_ocr_noise(' '.join(current_lines)),
                     'y_pct': current_y
                 })
-            # Start new segment with the matched question number
-            q_num = match.group(1) or match.group(3)
-            q_sub = match.group(2) or ''
-            current_label = f"{q_num}{q_sub}"
+            # Extract whichever capture group matched
+            q_num = next((g for g in match.groups()[0::2] if g is not None), None)
+            q_sub = next((g for g in match.groups()[1::2] if g is not None), '') or ''
+            current_label = f"{q_num}{q_sub}" if q_num else 'full'
             current_y = y_pct
-            # Keep the rest of the line after the question number marker
             rest = text[match.end():].strip()
             current_lines = [rest] if rest else []
         else:
@@ -374,7 +401,9 @@ def split_text_by_question(blocks: list) -> list:
 
     # If nothing was detected, return single segment with all text
     if not segments:
-        all_text = clean_ocr_noise(' '.join(b.get('text', '') for b in blocks))
+        all_text = clean_ocr_noise(' '.join(
+            normalize_encircled_digits(b.get('text', '')) for b in blocks
+        ))
         return [{'q_label': 'full', 'text': all_text, 'y_pct': 0.0}]
 
     return segments

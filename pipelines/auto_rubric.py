@@ -5,22 +5,49 @@ import re
 from pipelines.icr_pipeline3 import MM, DEVICE
 import torch
 
-def extract_text_from_pdf(pdf_path_or_bytes):
-    """Extract raw text from an Answer Key PDF."""
+def extract_text_from_pdf(pdf_path_or_bytes) -> str:
+    """
+    Extract raw text from a PDF (digital or scanned).
+    Falls back to EasyOCR when the digital text layer is empty/too short.
+    """
     try:
         import fitz  # PyMuPDF
     except ImportError:
-        raise ImportError("PyMuPDF is required to process PDFs. Please install it using `pip install pymupdf`")
-        
+        raise ImportError("PyMuPDF is required. Install with `pip install pymupdf`")
+
     if isinstance(pdf_path_or_bytes, str):
         doc = fitz.open(pdf_path_or_bytes)
     else:
         doc = fitz.open(stream=pdf_path_or_bytes, filetype="pdf")
-        
-    text = []
-    for page in doc:
-        text.append(page.get_text())
-    return "\n".join(text)
+
+    pages_text = [page.get_text().strip() for page in doc]
+    combined = "\n".join(pages_text)
+
+    if len(combined.strip()) >= 50:
+        return combined
+
+    # ── Scanned PDF: OCR fallback ──────────────────────────────────────────
+    print("[auto_rubric] Scanned PDF detected – falling back to EasyOCR")
+    import numpy as np, cv2, easyocr
+
+    if isinstance(pdf_path_or_bytes, str):
+        doc2 = fitz.open(pdf_path_or_bytes)
+    else:
+        doc2 = fitz.open(stream=pdf_path_or_bytes, filetype="pdf")
+
+    reader = easyocr.Reader(['en'], gpu=False)
+    ocr_pages = []
+    for page in doc2:
+        pix = page.get_pixmap(dpi=200)
+        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+        if pix.n == 4:
+            img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
+        elif pix.n == 3:
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        results = reader.readtext(img, detail=1)
+        results_sorted = sorted(results, key=lambda r: (r[0][0][1], r[0][0][0]))
+        ocr_pages.append("\n".join(t for _, t, c in results_sorted if c > 0.3))
+    return "\n".join(ocr_pages)
 
 def generate_rubric_from_answer_key(question: str, answer_key_text: str, question_document_text: str = "") -> dict:
     """
