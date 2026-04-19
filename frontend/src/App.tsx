@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback } from 'react';
-import { UploadCloud, Sparkles, AlertCircle, CheckCircle2, BookOpen, Loader2, ChevronLeft, ChevronRight, X, ChevronDown, ChevronUp } from 'lucide-react';
+import { UploadCloud, Sparkles, AlertCircle, CheckCircle2, BookOpen, Loader2, ChevronLeft, ChevronRight, X, ChevronDown, ChevronUp, Moon, Sun, Edit2, Target, Settings, Bot, FileText, MessageSquare, ClipboardList, BarChart, File, ZoomIn } from 'lucide-react';
 import './App.css';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -74,10 +74,10 @@ function AnswerPopup({
       {/* Header: chip + question selector */}
       <div style={{ marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
         {manualQNum != null
-          ? <span className="chip chip-yellow">✏️ Q{manualQNum}</span>
+          ? <span className="chip chip-yellow"><Edit2 size={12} /> Q{manualQNum}</span>
           : displayQ != null
-            ? <span className="chip chip-green">🎯 Q{displayQ}</span>
-            : <span className="chip chip-yellow">⚙️ Q{res.q_label}</span>}
+            ? <span className="chip chip-green"><Target size={12} /> Q{displayQ}</span>
+            : <span className="chip chip-yellow"><Settings size={12} /> Q{res.q_label}</span>}
         <span style={{ fontSize: '0.72rem', color: 'var(--muted)' }}>/ {maxM} marks</span>
       </div>
 
@@ -89,7 +89,7 @@ function AnswerPopup({
             value={manualQNum ?? ''}
             onChange={e => onManualSelect(e.target.value ? Number(e.target.value) : null)}
           >
-            <option value="">🤖 Auto ({displayQ != null ? `Q${displayQ}` : 'unmatched'})</option>
+            <option value="">Auto ({displayQ != null ? `Q${displayQ}` : 'unmatched'})</option>
             {qaDataset.map(q => (
               <option key={q.number} value={q.number}>Q{q.number} — {q.question.slice(0, 50)}{q.question.length > 50 ? '…' : ''}</option>
             ))}
@@ -112,14 +112,14 @@ function AnswerPopup({
       {/* Extracted Text */}
       {res.student_text && (
         <div style={{ marginTop: '0.5rem' }}>
-          <div style={{ fontSize: '0.72rem', color: 'var(--muted)', marginBottom: 2 }}>📝 Extracted Text</div>
+          <div style={{ fontSize: '0.72rem', color: 'var(--muted)', marginBottom: 2, display: 'flex', alignItems: 'center', gap: '4px' }}><FileText size={12} /> Extracted Text</div>
           <div className="popup-extracted">{res.student_text}</div>
         </div>
       )}
 
       {res.llm_output?.explanation && (
         <div className="feedback-box" style={{ marginTop: '0.5rem' }}>
-          <strong style={{ fontSize: '0.78rem' }}>🤖 Feedback</strong>
+          <strong style={{ fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: '4px' }}><MessageSquare size={14} /> Feedback</strong>
           <div style={{ marginTop: '0.3rem', fontSize: '0.78rem' }}>{res.llm_output.explanation}</div>
         </div>
       )}
@@ -150,10 +150,10 @@ function RubricPanel({ activeResult, qaDataset, manualOverrides, setManualOverri
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: '0.5rem', flexWrap: 'wrap' }}>
         {overrideItem
-          ? <span className="chip chip-yellow">✏️ Q{displayQ} (manual)</span>
+          ? <span className="chip chip-yellow"><Edit2 size={12} /> Q{displayQ} (manual)</span>
           : displayQ != null
-            ? <span className="chip chip-green">🎯 Q{displayQ}</span>
-            : <span className="chip chip-yellow">⚙️ Q{activeResult.q_label}</span>}
+            ? <span className="chip chip-green"><Target size={12} /> Q{displayQ}</span>
+            : <span className="chip chip-yellow"><Settings size={12} /> Q{activeResult.q_label}</span>}
         <span style={{ fontSize: '0.75rem', color: 'var(--muted)' }}>
           Max {displayRubric?.max_marks ?? 10} marks
         </span>
@@ -168,7 +168,7 @@ function RubricPanel({ activeResult, qaDataset, manualOverrides, setManualOverri
             value={manualNum ?? ''}
             onChange={e => setManualOverrides(prev => ({ ...prev, [activeResult.q_label]: e.target.value ? Number(e.target.value) : null }))}
           >
-            <option value="">🤖 Auto ({displayQ != null ? `Q${displayQ}` : 'unmatched'})</option>
+            <option value="">Auto ({displayQ != null ? `Q${displayQ}` : 'unmatched'})</option>
             {qaDataset.map(q => (
               <option key={q.number} value={q.number}>Q{q.number} — {q.question.slice(0, 55)}{q.question.length > 55 ? '…' : ''}</option>
             ))}
@@ -212,6 +212,8 @@ function RubricPanel({ activeResult, qaDataset, manualOverrides, setManualOverri
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
+  const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  const [zoom, setZoom] = useState(1);
   const [qaDataset, setQaDataset] = useState<QAItem[]>([]);
   const [loadingQA, setLoadingQA] = useState(false);
   const [qaError, setQaError] = useState<string | null>(null);
@@ -254,7 +256,7 @@ export default function App() {
   };
 
   const handleStudentPdf = useCallback(async (file: File) => {
-    setPdfFile(file); setPages([]); setCurIdx(0); setClosedPopups(new Set());
+    setPdfFile(file); setPages([]); setCurIdx(0); setClosedPopups(new Set()); setZoom(1);
 
     // Check if the file is an image (not a PDF) — handle it directly as a single page
     const isImage = /\.(jpe?g|png|bmp|gif|webp|tiff?)$/i.test(file.name) ||
@@ -340,7 +342,7 @@ export default function App() {
 
   // ─── Render ───────────────────────────────────────────────────────────────
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-theme={theme}>
 
       {/* ─── Header ──────────────────────────────────────────────────────────── */}
       <header className="app-header">
@@ -348,11 +350,16 @@ export default function App() {
           <h1>Ankya AI ⚡</h1>
           <div className="header-sub">Teacher Re-evaluation Dashboard</div>
         </div>
-        {pdfFile && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto', fontSize: '0.85rem', color: 'var(--success)' }}>
-            <CheckCircle2 size={16} /> {pdfFile.name} · {pages.length} pages
-          </div>
-        )}
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '1rem' }}>
+          {pdfFile && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.85rem', color: 'var(--success)' }}>
+              <CheckCircle2 size={16} /> {pdfFile.name} · {pages.length} pages
+            </div>
+          )}
+          <button className="btn-ghost" onClick={() => setTheme(t => t === 'light' ? 'dark' : 'light')} style={{ padding: '0.5rem', borderRadius: '50%' }} title="Toggle Theme">
+            {theme === 'light' ? <Moon size={18} /> : <Sun size={18} />}
+          </button>
+        </div>
       </header>
 
       {/* ─── Left Pane: PDF Viewer ──────────────────────────────────────────── */}
@@ -360,15 +367,22 @@ export default function App() {
         {/* Toolbar */}
         {pages.length > 0 && (
           <div className="pdf-toolbar">
-            <button className="btn-ghost btn-sm" disabled={curIdx === 0}
-              onClick={() => { setCurIdx(i => i - 1); setClosedPopups(new Set()); }}>
-              <ChevronLeft size={16} /> Prev
-            </button>
-            <span style={{ fontSize: '0.85rem', color: 'var(--muted)' }}>Page {curIdx + 1} of {pages.length}</span>
-            <button className="btn-ghost btn-sm" disabled={curIdx === pages.length - 1}
-              onClick={() => { setCurIdx(i => i + 1); setClosedPopups(new Set()); }}>
-              Next <ChevronRight size={16} />
-            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <button className="btn-ghost btn-sm" disabled={curIdx === 0}
+                onClick={() => { setCurIdx(i => i - 1); setClosedPopups(new Set()); setZoom(1); }}>
+                <ChevronLeft size={16} /> Prev
+              </button>
+              <span style={{ fontSize: '0.85rem', color: 'var(--muted)' }}>Page {curIdx + 1} of {pages.length}</span>
+              <button className="btn-ghost btn-sm" disabled={curIdx === pages.length - 1}
+                onClick={() => { setCurIdx(i => i + 1); setClosedPopups(new Set()); setZoom(1); }}>
+                Next <ChevronRight size={16} />
+              </button>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <ZoomIn size={14} color="var(--muted)" />
+              <input type="range" min="0.5" max="3" step="0.1" value={zoom} onChange={e => setZoom(Number(e.target.value))} style={{ width: '80px', padding: 0, border: 'none', background: 'transparent' }} title="Zoom Image" />
+              <span style={{ fontSize: '0.75rem', color: 'var(--muted)', width: '32px', textAlign: 'right' }}>{Math.round(zoom * 100)}%</span>
+            </div>
           </div>
         )}
 
@@ -387,7 +401,7 @@ export default function App() {
             </div>
           ) : currPage ? (
             <>
-              <img src={currPage.url} className="pdf-img" alt={`Page ${curIdx + 1}`} />
+              <img src={currPage.url} className="pdf-img" alt={`Page ${curIdx + 1}`} style={{ width: `${zoom * 100}%` }} />
 
               {/* Per-answer floating popups, positioned by y_pct */}
               {currPage.results.map((r, ri) => {
@@ -417,7 +431,7 @@ export default function App() {
           <div style={{ padding: '0 1rem', flexShrink: 0 }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', padding: '0.4rem 0', border: 'none', background: 'transparent', color: 'var(--muted)', fontSize: '0.8rem' }}
               onClick={() => setShowOcr(v => !v)}>
-              <span>📄 Extracted OCR Text</span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}><File size={14} /> Extracted OCR Text</span>
               {showOcr ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
             </div>
             {showOcr && <div className="ocr-box">{currPage.results[0].full_page_text || 'No text extracted.'}</div>}
@@ -485,8 +499,8 @@ export default function App() {
         </div>
 
         {/* Rubric Section */}
-        <div className="right-section">
-          <div className="panel-title">📋 Rubric</div>
+        <div className="right-section" style={{ maxHeight: '40vh', overflowY: 'auto', flexShrink: 0 }}>
+          <div className="panel-title"><ClipboardList size={16} /> Rubric</div>
 
           {/* If a graded answer is selected, show its matched rubric */}
           {activeResult ? (
@@ -506,7 +520,7 @@ export default function App() {
               </p>
               <div className="form-group">
                 <label>Reference Answer</label>
-                <textarea rows={2} value={refLong} onChange={e => setRefLong(e.target.value)} />
+                <textarea rows={4} value={refLong} onChange={e => setRefLong(e.target.value)} />
               </div>
               <div style={{ display: 'flex', gap: '0.6rem' }}>
                 <div className="form-group" style={{ flex: 2 }}>
@@ -524,7 +538,7 @@ export default function App() {
 
         {/* Score Grid */}
         <div className="right-section" style={{ flex: 1 }}>
-          <div className="panel-title">📊 Answer Score from Model</div>
+          <div className="panel-title"><BarChart size={16} /> Answer Score from Model</div>
           <p style={{ fontSize: '0.75rem', color: 'var(--warning)', marginBottom: '0.5rem' }}>* Editable for the teacher</p>
           {Object.keys(editableScores).length === 0 ? (
             <p style={{ fontSize: '0.85rem', color: 'var(--muted)', fontStyle: 'italic', marginTop: '1rem', textAlign: 'center' }}>Analyze a page to generate scores…</p>

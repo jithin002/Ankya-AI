@@ -196,7 +196,14 @@ def trocr_recognize_pil(pil_img: Image.Image, trocr_bundle, max_new_tokens: int 
     if DEVICE == "cuda":
         pixel_values = pixel_values.half()
     with torch.inference_mode():
-        generated_ids = model.generate(pixel_values, max_new_tokens=max_new_tokens, num_beams=num_beams, do_sample=False)
+        generated_ids = model.generate(
+            pixel_values, 
+            max_new_tokens=max_new_tokens, 
+            num_beams=num_beams, 
+            do_sample=False,
+            repetition_penalty=1.2,
+            no_repeat_ngram_size=3
+        )
     text = tokenizer.decode(generated_ids[0], skip_special_tokens=True).strip()
     return text
 
@@ -212,33 +219,25 @@ def recognize_with_trocr_per_line(image_path: str, easyocr_blocks: List[Dict], t
     # 2) Heuristics: remove tiny boxes (relaxed – handwriting near margins is valid)
     filtered = []
     min_area = max(80, 0.0005 * (W * H))  # was 200/0.002 – relaxed to catch small circled numbers
-    top_margin = 0.01 * H                  # was 0.03 – allow text very near top edge
-    bottom_margin = 0.99 * H              # was 0.97 – allow text very near bottom edge
     for b in merged:
         x, y, w, h = b['bbox']
         area = w * h
         if area < min_area: continue
-        if y < top_margin or (y + h) > bottom_margin:
-            if not (w > 0.4 * W and h > 0.01 * H): continue  # was 0.6W/0.02H
         filtered.append(b)
 
     filtered = sorted(filtered, key=lambda x: x['bbox'][1])
 
     # Preprocessing helpers
     def preprocess_crop_for_trocr(crop_bgr):
+        # Preprocessing: Convert to grayscale and apply CLAHE to boost contrast.
+        # Avoid harsh binarization and morphological ops that destroy thin handwriting.
         gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
         try:
             clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
             gray = clahe.apply(gray)
         except: pass
-        gray = cv2.medianBlur(gray, 3)
-        try:
-            th = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 8)
-        except:
-            _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3,3))
-        th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, kernel, iterations=1)
-        return th
+        # Return as BGR since TrOCR processor converts it back to Pil/RGB anyway
+        return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
     results = []
     for b in filtered:
@@ -274,11 +273,11 @@ def remove_ruled_lines(img_bgr) -> object:
     """Use OpenCV morphological transforms to erase horizontal ruled lines from notebook paper.
     Returns a clean BGR image with only the handwriting remaining."""
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    # Adaptive threshold to isolate dark pixels
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    # Use adaptive threshold instead of OTSU to handle uneven lighting/shadows
+    binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 10)
     # Detect horizontal lines using a wide, flat kernel
-    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (int(binary.shape[1] // 4), 1))
-    horizontal_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horizontal_kernel, iterations=2)
+    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (int(binary.shape[1] // 8), 1))
+    horizontal_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horizontal_kernel, iterations=1)
     # Remove them from the original binary image
     cleaned = cv2.subtract(binary, horizontal_lines)
     # Restore handwriting on white background
