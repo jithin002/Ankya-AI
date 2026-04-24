@@ -44,7 +44,18 @@ except:
 class ModelManager:
     def __init__(self):
         self.device = DEVICE
-        self.grammar_cache = shelve.open("grammar_cache.db")
+        self._open_grammar_cache()
+
+    def _open_grammar_cache(self):
+        try:
+            self.grammar_cache = shelve.open("grammar_cache.db")
+        except Exception as e:
+            print(f"[ModelManager] Grammar cache open failed ({e}), starting fresh.")
+            import glob
+            for f in glob.glob("grammar_cache.db*"):
+                try: os.remove(f)
+                except: pass
+            self.grammar_cache = shelve.open("grammar_cache.db")
     
     def garbage_collect(self):
         """Force garbage collection and empty CUDA cache."""
@@ -616,26 +627,57 @@ def semantic_score(student_text: str, reference_texts: List[str], model) -> floa
 def grammar_score_model(student_text: str, tokenizer, model) -> float:
     if not student_text.strip() or not tokenizer or not model: return 0.0
     text = student_text[:2000] # truncate
-    
+
     # Check cache
     key = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    if key in MM.grammar_cache:
-        corrected = MM.grammar_cache[key]
-    else:
+    try:
+        if key in MM.grammar_cache:
+            corrected = MM.grammar_cache[key]
+        else:
+            raise KeyError("not cached")
+    except (KeyError, FileNotFoundError, Exception):
+        # Cache miss or db files deleted at runtime — reopen and recompute
+        try:
+            MM._open_grammar_cache()
+        except Exception:
+            pass
+        corrected = None
+
+    if corrected is None:
         try:
             inputs = tokenizer.encode(text, return_tensors="pt", truncation=True, max_length=512).to(DEVICE)
             with torch.no_grad():
                 out = model.generate(inputs, max_new_tokens=256, do_sample=False)
             corrected = tokenizer.decode(out[0], skip_special_tokens=True).strip()
-            MM.grammar_cache[key] = corrected
-            MM.grammar_cache.sync()
+            try:
+                MM.grammar_cache[key] = corrected
+                MM.grammar_cache.sync()
+            except Exception:
+                pass  # cache write failure is non-fatal
         except:
             return 70.0 # fallback
 
     ed = Levenshtein.distance(text.strip(), corrected)
     norm = ed / max(1, len(text))
+
+    # ── Diagnostic ─────────────────────────────────────────────────────────
+    print(f"[Grammar] Original  ({len(text)} chars): {text[:80]}...")
+    print(f"[Grammar] Corrected ({len(corrected)} chars): {corrected[:80]}...")
+    print(f"[Grammar] edit_dist={ed}, norm={norm:.3f}")
+
+    # ── OCR-Noise Detection ─────────────────────────────────────────────────
+    # When norm > 0.50, the grammar corrector changed >50% of characters.
+    # Real grammar fixes never change that much — this is OCR noise being
+    # (wrongly) treated as grammar errors. Return a neutral floor (50) so
+    # a noisy scan doesn't zero-out the grammar dimension unfairly.
+    if norm > 0.50:
+        print(f"[Grammar] OCR-noise detected (norm={norm:.2f}>0.50) → returning floor 50")
+        return 50.0
+
     score = max(0.0, 100.0 * (1.0 - (norm / 0.30)))
-    if len(text.split()) < 3: score = min(score, 50.0)
+    if len(text.split()) < 3:
+        score = min(score, 50.0)
+    print(f"[Grammar] Score: {score:.1f}")
     return min(100.0, score)
 
 def content_coverage_score(student_text: str, reference_short: List[str]) -> float:

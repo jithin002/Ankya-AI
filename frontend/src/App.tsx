@@ -220,6 +220,9 @@ export default function App() {
   const qPdfRef = useRef<HTMLInputElement>(null);
   const aPdfRef = useRef<HTMLInputElement>(null);
 
+  // globalSelectedQ: null = Auto (multi-answer), number = grade entire page as this one question
+  const [globalSelectedQ, setGlobalSelectedQ] = useState<number | null>(null);
+
   const [refLong, setRefLong] = useState("Newton's first law states that an object at rest stays at rest and an object in motion stays in motion with the same speed and in the same direction unless acted upon by an unbalanced force.");
   const [refShort, setRefShort] = useState('rest, motion, unbalanced force');
   const [keywords, setKeywords] = useState('inertia, rest, motion, force');
@@ -236,6 +239,20 @@ export default function App() {
   const [activeResult, setActiveResult] = useState<AnswerResult | null>(null);
   // manualOverrides: maps q_label -> manually chosen QAItem number (or null = auto)
   const [manualOverrides, setManualOverrides] = useState<Record<string, number | null>>({});
+
+  // When teacher picks a specific Q from the dropdown, auto-fill the rubric form
+  const handleGlobalQSelect = (qNum: number | null) => {
+    setGlobalSelectedQ(qNum);
+    if (qNum !== null) {
+      const item = qaDataset.find(q => q.number === qNum);
+      if (item) {
+        setRefLong(item.rubric.reference_long ?? '');
+        setRefShort((item.rubric.reference_short ?? []).join(', '));
+        setKeywords((item.rubric.keywords ?? []).map(k => k.term).join(', '));
+        setMaxMarks(item.rubric.max_marks ?? 10);
+      }
+    }
+  };
 
   const handleLoadQA = async () => {
     const qf = qPdfRef.current?.files?.[0];
@@ -308,17 +325,33 @@ export default function App() {
     fd.append('ref_short', refShort);
     fd.append('keywords', keywords);
     fd.append('max_marks', maxMarks.toString());
-    if (qaDataset.length > 0) fd.append('qa_dataset_json', JSON.stringify(qaDataset));
-    // Send manual overrides so backend respects user's question selection
-    if (Object.keys(manualOverrides).length > 0) {
-      fd.append('manual_q_overrides_json', JSON.stringify(manualOverrides));
+
+    // If a specific Q is selected, skip dataset → single-question mode (grade whole page as that Q)
+    // If Auto (null), pass full dataset → multi-answer detection mode
+    if (globalSelectedQ === null && qaDataset.length > 0) {
+      fd.append('qa_dataset_json', JSON.stringify(qaDataset));
+      // Send manual overrides so backend respects per-popup question selection
+      if (Object.keys(manualOverrides).length > 0) {
+        fd.append('manual_q_overrides_json', JSON.stringify(manualOverrides));
+      }
     }
 
     try {
       const res = await fetch(`${API}/grade-page/`, { method: 'POST', body: fd });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
-      const results: AnswerResult[] = data.results ?? [];
+      let results: AnswerResult[] = data.results ?? [];
+
+      // In single-Q mode, patch results so popup shows the chosen question label
+      if (globalSelectedQ !== null) {
+        const chosenItem = qaDataset.find(q => q.number === globalSelectedQ);
+        results = results.map(r => ({
+          ...r,
+          auto_matched_question: globalSelectedQ,
+          matched_question_text: chosenItem?.question ?? r.matched_question_text,
+          rubric: chosenItem?.rubric ?? r.rubric,
+        }));
+      }
 
       setPages(prev => prev.map((p, i) => i === idx ? { ...p, results, loading: false } : p));
 
@@ -499,7 +532,7 @@ export default function App() {
         </div>
 
         {/* Rubric Section */}
-        <div className="right-section" style={{ maxHeight: '40vh', overflowY: 'auto', flexShrink: 0 }}>
+        <div className="right-section" style={{ maxHeight: '48vh', overflowY: 'auto', flexShrink: 0 }}>
           <div className="panel-title"><ClipboardList size={16} /> Rubric</div>
 
           {/* If a graded answer is selected, show its matched rubric */}
@@ -513,25 +546,69 @@ export default function App() {
             />
           ) : (
             <div>
-              <p style={{ fontSize: '0.78rem', color: 'var(--muted)', marginBottom: '0.75rem' }}>
-                {qaDataset.length > 0
-                  ? 'Click a popup to preview its rubric, or override manually below.'
-                  : 'Enter rubric manually since no Q&A dataset is loaded.'}
-              </p>
-              <div className="form-group">
-                <label>Reference Answer</label>
-                <textarea rows={4} value={refLong} onChange={e => setRefLong(e.target.value)} />
-              </div>
-              <div style={{ display: 'flex', gap: '0.6rem' }}>
-                <div className="form-group" style={{ flex: 2 }}>
-                  <label>Keywords</label>
-                  <input value={keywords} onChange={e => setKeywords(e.target.value)} />
+              {/* Question selector dropdown — only shown when QA dataset is loaded */}
+              {qaDataset.length > 0 && (
+                <div style={{ marginBottom: '0.75rem' }}>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--muted)', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <Bot size={13} /> Grade Page As
+                  </div>
+                  <select
+                    className="popup-q-select"
+                    style={{ width: '100%', fontSize: '0.82rem' }}
+                    value={globalSelectedQ ?? ''}
+                    onChange={e => handleGlobalQSelect(e.target.value ? Number(e.target.value) : null)}
+                  >
+                    <option value="">⚡ Auto — detect all questions</option>
+                    {qaDataset.map(q => (
+                      <option key={q.number} value={q.number}>
+                        Q{q.number} — {q.question.slice(0, 52)}{q.question.length > 52 ? '…' : ''}
+                      </option>
+                    ))}
+                  </select>
+                  {globalSelectedQ !== null && (
+                    <div style={{ fontSize: '0.7rem', color: 'var(--warning)', marginTop: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
+                      <Edit2 size={11} /> Grading entire page as Q{globalSelectedQ}. Rubric auto-filled below — you can edit before analyzing.
+                    </div>
+                  )}
+                  {globalSelectedQ === null && (
+                    <div style={{ fontSize: '0.7rem', color: 'var(--success)', marginTop: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
+                      <Sparkles size={11} /> Multi-answer auto detection active.
+                    </div>
+                  )}
                 </div>
-                <div className="form-group" style={{ flex: 1 }}>
-                  <label>Max Marks</label>
-                  <input type="number" value={maxMarks} onChange={e => setMaxMarks(Number(e.target.value))} />
-                </div>
-              </div>
+              )}
+
+              {/* Show manual rubric form when: no dataset loaded OR a specific Q is selected */}
+              {(qaDataset.length === 0 || globalSelectedQ !== null) && (
+                <>
+                  <p style={{ fontSize: '0.78rem', color: 'var(--muted)', marginBottom: '0.6rem' }}>
+                    {qaDataset.length > 0
+                      ? `Rubric for Q${globalSelectedQ} — edit if needed, then click Analyze.`
+                      : 'Enter rubric manually since no Q&A dataset is loaded.'}
+                  </p>
+                  <div className="form-group">
+                    <label>Reference Answer</label>
+                    <textarea rows={4} value={refLong} onChange={e => setRefLong(e.target.value)} />
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.6rem' }}>
+                    <div className="form-group" style={{ flex: 2 }}>
+                      <label>Keywords</label>
+                      <input value={keywords} onChange={e => setKeywords(e.target.value)} />
+                    </div>
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label>Max Marks</label>
+                      <input type="number" value={maxMarks} onChange={e => setMaxMarks(Number(e.target.value))} />
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {/* In Auto mode with dataset loaded, show brief hint only */}
+              {qaDataset.length > 0 && globalSelectedQ === null && (
+                <p style={{ fontSize: '0.78rem', color: 'var(--muted)', marginTop: '0.25rem' }}>
+                  Click a result popup to preview its matched rubric.
+                </p>
+              )}
             </div>
           )}
         </div>
