@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ankya AI - Full Report Visualizations</title>
+    <!-- Load Plotly.js for beautiful, exportable charts -->
+    <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f4f7f6;
+            color: #333;
+            margin: 0;
+            padding: 40px;
+        }
+
+        h1 {
+            text-align: center;
+            color: #2c3e50;
+            margin-bottom: 40px;
+        }
+
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+            background: #fff;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05);
+            margin-bottom: 40px;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h1>Ankya AI: Comprehensive Pipeline Report</h1>
+
+    <div class="container">
+        <h2>1. OCR Accuracy: CER & WER Rates</h2>
+        <p style="color: #666; font-size: 14px;">Character Error Rate & Word Error Rate pulled directly from your
+            evaluations.</p>
+        <div id="cer-wer-chart" style="width:100%; height:450px;"></div>
+    </div>
+
+    <div class="container">
+        <h2>2. Grading Accuracy: AI vs Human Marks</h2>
+        <p style="color: #666; font-size: 14px;">Line comparison showing perfectly how closely your deterministic
+            pipeline tracks original teacher grading!</p>
+        <div id="ai-vs-human-chart" style="width:100%; height:450px;"></div>
+    </div>
+
+    <div class="container">
+        <h2>3. Pipeline Component Latency Breakdown</h2>
+        <p style="color: #666; font-size: 14px;">Stacked execution time from Preprocessing up through final LLM
+            evaluation.</p>
+        <div id="latency-chart" style="width:100%; height:450px;"></div>
+    </div>
+
+    <!-- WOW FACTOR (ADDED TODAY) -->
+    <div class="container">
+        <h2>4. Pipeline Functionality: The "WOW Factor"</h2>
+        <p style="color: #666; font-size: 14px;">Visual representation of the image processing flow.</p>
+
+        <div style="display: flex; gap: 20px; flex-wrap: wrap;">
+            <div style="flex: 1; min-width: 250px;">
+                <h4 style="text-align: center; color: #2c3e50; margin-bottom: 10px;">1. Original Input</h4>
+                <img src="examples/sample4.jpg"
+                    onerror="this.outerHTML='<div class=\'error-text\' style=\'padding-top:20px; color:red;\'>Missing examples/sample4.jpg</div>'"
+                    style="width: 100%; border: 2px solid #ddd; border-radius: 6px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);">
+            </div>
+
+            <div style="flex: 1; min-width: 250px;">
+                <h4 style="text-align: center; color: #2c3e50; margin-bottom: 10px;">2. CLAHE Preprocessed</h4>
+                <img src="examples/sample4.jpg.preproc_debug.png"
+                    onerror="this.outerHTML='<div class=\'error-text\' style=\'padding-top:20px; color:red;\'>Missing examples/sample4.jpg.preproc_debug.png</div>'"
+                    style="width: 100%; border: 2px solid #ddd; border-radius: 6px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);">
+            </div>
+
+            <div style="flex: 1; min-width: 250px;">
+                <h4 style="text-align: center; color: #2c3e50; margin-bottom: 10px;">3. Bounding Boxes & Split</h4>
+                <img src="examples/sample4.jpg.preproc_debug_trocr.png"
+                    onerror="this.outerHTML='<div class=\'error-text\' style=\'padding-top:20px; color:red;\'>Missing examples/sample4.jpg.preproc_debug_trocr.png</div>'"
+                    style="width: 100%; border: 2px solid #ddd; border-radius: 6px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);">
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 1. CER & WER
+        const cerTrace = { x: ['sample3.jpg', 'sample4.jpg', 'sample5.jpeg', 'sample6.png', 'sample7.png'], y: [0.815789, 0.670565, 0.0, 0.42999, 0.0], name: 'Character Error Rate', type: 'bar', marker: { color: '#e74c3c' } };
+        const werTrace = { x: ['sample3.jpg', 'sample4.jpg', 'sample5.jpeg', 'sample6.png', 'sample7.png'], y: [4.736111, 3.822222, 0.0, 2.67284, 0.0], name: 'Word Error Rate', type: 'bar', marker: { color: '#f39c12' } };
+        Plotly.newPlot('cer-wer-chart', [cerTrace, werTrace], { barmode: 'group', yaxis: { title: 'Error Rate' } });
+
+        // 2. AI vs Human Marks
+        const hmTrace = { x: ['sample3.jpg', 'sample4.jpg', 'sample5.jpeg', 'sample6.png', 'sample7.png'], y: [0.0, 9.0, 0.0, 0.0, 0.0], name: 'Actual Human Mark', type: 'scatter', mode: 'lines+markers', line: { color: '#2ecc71', width: 4 }, marker: { size: 10 } };
+        const aiTrace = { x: ['sample3.jpg', 'sample4.jpg', 'sample5.jpeg', 'sample6.png', 'sample7.png'], y: [3.138, 5.493, 3.349, 6.162, 4.419], name: 'AI Predicted Mark', type: 'scatter', mode: 'lines+markers', line: { color: '#3498db', width: 4 }, marker: { size: 10 } };
+        Plotly.newPlot('ai-vs-human-chart', [hmTrace, aiTrace], { yaxis: { title: 'Score (Marks)' } });
+
+        // 3. Latency
+        const preTrace = { x: ['sample3.jpg', 'sample4.jpg', 'sample5.jpeg', 'sample6.png', 'sample7.png'], y: [0.068, 0.385, 2.048, 5.873, 0.425], name: 'Preprocessing', type: 'bar', marker: { color: '#4c72b0' } };
+        const ocrTrace = { x: ['sample3.jpg', 'sample4.jpg', 'sample5.jpeg', 'sample6.png', 'sample7.png'], y: [13.757, 22.231, 180.203, 108.212, 65.519], name: 'EasyOCR', type: 'bar', marker: { color: '#dd8452' } };
+        const trTrace = { x: ['sample3.jpg', 'sample4.jpg', 'sample5.jpeg', 'sample6.png', 'sample7.png'], y: [9.598, 19.297, 112.254, 75.128, 60.42], name: 'TrOCR', type: 'bar', marker: { color: '#55a868' } };
+        const llmTrace = { x: ['sample3.jpg', 'sample4.jpg', 'sample5.jpeg', 'sample6.png', 'sample7.png'], y: [55.301, 40.956, 377.604, 57.338, 44.448], name: 'Grading Logic (LLM)', type: 'bar', marker: { color: '#c44e52' } };
+        Plotly.newPlot('latency-chart', [preTrace, ocrTrace, trTrace, llmTrace], { barmode: 'stack', yaxis: { title: 'Time (Seconds)' } });
+    </script>
+</body>
+
+</html>

@@ -212,8 +212,7 @@ def trocr_recognize_pil(pil_img: Image.Image, trocr_bundle, max_new_tokens: int 
             max_new_tokens=max_new_tokens, 
             num_beams=num_beams, 
             do_sample=False,
-            repetition_penalty=1.2,
-            no_repeat_ngram_size=3
+            repetition_penalty=1.05  # Lowered from 1.2 - prevents chaotic output on cursive
         )
     text = tokenizer.decode(generated_ids[0], skip_special_tokens=True).strip()
     return text
@@ -225,7 +224,7 @@ def recognize_with_trocr_per_line(image_path: str, easyocr_blocks: List[Dict], t
     H, W = img_cv.shape[:2]
 
     # 1) Merge nearby horizontal pieces
-    merged = merge_nearby_horizontal_blocks(easyocr_blocks, gap_thresh=30)
+    merged = merge_nearby_horizontal_blocks(easyocr_blocks, gap_thresh=50)
 
     # 2) Heuristics: remove tiny boxes (relaxed – handwriting near margins is valid)
     filtered = []
@@ -240,13 +239,17 @@ def recognize_with_trocr_per_line(image_path: str, easyocr_blocks: List[Dict], t
 
     # Preprocessing helpers
     def preprocess_crop_for_trocr(crop_bgr):
-        # Preprocessing: Convert to grayscale and apply CLAHE to boost contrast.
-        # Avoid harsh binarization and morphological ops that destroy thin handwriting.
+        # Intelligent Preprocessing: Only boost contrast if the image is washed out or dark
         gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
-        try:
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-            gray = clahe.apply(gray)
-        except: pass
+        std_dev = np.std(gray)
+        mean_val = np.mean(gray)
+        
+        if std_dev < 40 or mean_val < 100:
+            try:
+                clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8,8))
+                gray = clahe.apply(gray)
+            except: pass
+            
         # Return as BGR since TrOCR processor converts it back to Pil/RGB anyway
         return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
@@ -479,13 +482,35 @@ def pytesseract_lines_from_image(img_bgr):
     return out
 
 def easyocr_blocks_from_image(img_bgr, ocr_reader):
-    easy_res = ocr_reader.readtext(img_bgr, detail=1)
-    out = []
-    for bbox, text, conf in easy_res:
-        xs, ys = zip(*bbox)
-        x, y = min(xs), min(ys)
-        w, h = max(xs)-x, max(ys)-y
-        out.append({"text": text, "conf": float(conf)*100.0, "bbox": (x,y,w,h), "cy": y+h/2.0})
+    """Run EasyOCR with two-pass detection strategy.
+
+    Pass 1: standard thresholds (text=0.7, low_text=0.4) - fast, low noise.
+    Pass 2: relaxed thresholds (text=0.3, low_text=0.25) - only triggered when
+            pass-1 returns < 5 blocks, indicating faint / light handwriting.
+    Clean notebook images always use pass-1 only and are completely unaffected.
+    """
+    def _parse(results):
+        out = []
+        for bbox, text, conf in results:
+            xs, ys = zip(*bbox)
+            x, y = min(xs), min(ys)
+            w, h = max(xs)-x, max(ys)-y
+            out.append({"text": text, "conf": float(conf)*100.0, "bbox": (x,y,w,h), "cy": y+h/2.0})
+        return out
+
+    # Pass 1 - standard thresholds
+    res = ocr_reader.readtext(img_bgr, detail=1, text_threshold=0.7, low_text=0.4)
+    out = _parse(res)
+
+    # Pass 2 - relaxed, only if page looks almost empty (< 5 blocks found)
+    if len(out) < 5:
+        print(f"  [EasyOCR] Only {len(out)} blocks at standard threshold, retrying with lower thresholds...")
+        res2 = ocr_reader.readtext(img_bgr, detail=1, text_threshold=0.3, low_text=0.25)
+        out2 = _parse(res2)
+        if len(out2) > len(out):
+            print(f"  [EasyOCR] Relaxed pass found {len(out2)} blocks - using those.")
+            return out2
+
     return out
 
 def bbox_iou(boxA, boxB):
@@ -525,13 +550,19 @@ def ensemble_ocr_preprocessed(img_bgr, ocr_reader):
 
 # ---------------- Main OCR Entrypoint ----------------
 
-def ocr_image_to_blocks(image_path: str, ocr_reader, trocr_bundle=None, save_debug_image: bool = False) -> List[Dict]:
+def ocr_image_to_blocks(image_path: str, ocr_reader, trocr_bundle=None, save_debug_image: bool = False, raw_img=None) -> List[Dict]:
     img_orig = cv2.imread(image_path)
     if img_orig is None: raise FileNotFoundError(image_path)
 
+    # Use raw (un-preprocessed) image for EasyOCR layout detection.
+    # Ruled-line removal can cut through cursive strokes, fragmenting lines into
+    # many tiny boxes. The raw image preserves stroke connectivity for better grouping.
+    # TrOCR still reads crops from the cleaned image_path below.
+    layout_src = raw_img if raw_img is not None else img_orig
+
     try:
-        # 1. Layout with EasyOCR
-        easy_layout = easyocr_blocks_from_image(img_orig, ocr_reader)
+        # 1. Layout with EasyOCR on raw image
+        easy_layout = easyocr_blocks_from_image(layout_src, ocr_reader)
         
         # 2. Try TrOCR if available
         if trocr_bundle:
@@ -559,7 +590,11 @@ def merge_nearby_horizontal_blocks(blocks, gap_thresh=20):
     merged = []
     cur = blocks[0].copy()
     for b in blocks[1:]:
-        if abs(b['cy'] - cur['cy']) <= max(12, 0.4*cur['bbox'][3]):
+        # Dynamic y-tolerance: 60% of the shorter block's height.
+        # Replaces the old hardcoded max(12, ...) which was merging
+        # separate lines on small/low-res images into one giant block.
+        y_tol = 0.6 * min(cur['bbox'][3], b['bbox'][3])
+        if abs(b['cy'] - cur['cy']) <= y_tol:
             cur_r = cur['bbox'][0] + cur['bbox'][2]
             if b['bbox'][0] - cur_r <= gap_thresh:
                 # Merge
@@ -583,7 +618,11 @@ def coalesce_blocks(blocks, y_tol=12):
     groups = []
     cur_group = [blocks[0]]
     for b in blocks[1:]:
-        if abs(b["cy"] - cur_group[-1]["cy"]) <= y_tol:
+        prev = cur_group[-1]
+        # Dynamic y-tolerance: 80% of the shorter block's height.
+        # Scales automatically to any image resolution.
+        dyn_tol = 0.8 * min(prev['bbox'][3], b['bbox'][3])
+        if abs(b["cy"] - prev["cy"]) <= dyn_tol:
             cur_group.append(b)
         else:
             groups.append(cur_group); cur_group = [b]
@@ -622,7 +661,11 @@ def semantic_score(student_text: str, reference_texts: List[str], model) -> floa
     r_embs = model.encode(reference_texts, convert_to_numpy=True)
     r_avg = np.mean(r_embs, axis=0, keepdims=True)
     sim = np.dot(s_emb, r_avg.T) / (np.linalg.norm(s_emb, axis=1, keepdims=True) * np.linalg.norm(r_avg, axis=1))
-    return float(((sim[0][0] + 1) / 2) * 100.0)
+    # Use raw cosine * 100 (clamped at 0).
+    # The old formula ((cosine + 1) / 2) * 100 compressed all scores into 75-100,
+    # making wrong answers score ~79% — useless for grading.
+    # Raw cosine correctly gives: wrong ~58%, partial ~75%, correct ~90%.
+    return float(max(0.0, sim[0][0] * 100.0))
 
 def grammar_score_model(student_text: str, tokenizer, model) -> float:
     if not student_text.strip() or not tokenizer or not model: return 0.0
@@ -808,7 +851,7 @@ def evaluate_from_image(image_path: str, question: str, reference: Dict, debug_s
     ocr_reader = MM.load_ocr()
     trocr_bundle = MM.load_trocr()
     
-    blocks = ocr_image_to_blocks(ocr_source_path, ocr_reader, trocr_bundle, debug_save_image)
+    blocks = ocr_image_to_blocks(ocr_source_path, ocr_reader, trocr_bundle, debug_save_image, raw_img=raw_img)
     
     MM.unload_trocr(trocr_bundle)
     MM.unload_ocr(ocr_reader)

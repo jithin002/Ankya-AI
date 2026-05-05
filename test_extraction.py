@@ -4,15 +4,15 @@ test_extraction.py
 Standalone text extraction test harness extracted from icr_pipeline3.py.
 
 Covers ONLY the extraction / pre-processing stack:
-  ┌─────────────────────────────────────────────┐
-  │  Image ──► preprocess_for_ocr               │
-  │        ──► EasyOCR layout detection         │
-  │        ──► TrOCR per-line refinement        │
-  │        ──► Pytesseract ensemble (fallback)  │
-  │        ──► merge_nearby_horizontal_blocks   │
-  │        ──► coalesce_blocks                  │
-  │        ──► split_text_by_question           │
-  └─────────────────────────────────────────────┘
+  ┌---------------------------------------------┐
+  |  Image --► preprocess_for_ocr               |
+  |        --► EasyOCR layout detection         |
+  |        --► TrOCR per-line refinement        |
+  |        --► Pytesseract ensemble (fallback)  |
+  |        --► merge_nearby_horizontal_blocks   |
+  |        --► coalesce_blocks                  |
+  |        --► split_text_by_question           |
+  +---------------------------------------------┘
 
 No scoring, grammar models, LLM or SentenceTransformer is loaded here.
 
@@ -36,11 +36,11 @@ import time
 import tempfile
 from typing import List, Dict, Tuple, Optional
 
-# ── Optional: set Tesseract path if not on PATH ─────────────────────────────
+# -- Optional: set Tesseract path if not on PATH -----------------------------
 # Uncomment and fix this if pytesseract raises a "tesseract not found" error:
 # import pytesseract
 # pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 import cv2
 import numpy as np
@@ -56,7 +56,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"[Extraction] Using device: {DEVICE}")
 
 
-# ─────────────────────────────────── Preprocessing ──────────────────────────
+# ----------------------------------- Preprocessing --------------------------
 
 def deskew_image(img_gray: np.ndarray) -> Tuple[np.ndarray, float]:
     """Rotate image to correct skew using Hough line detection."""
@@ -114,7 +114,7 @@ def preprocess_for_ocr(img_bgr: np.ndarray) -> np.ndarray:
 def preprocess_image_for_ocr(image_path: str) -> np.ndarray:
     """
     Secondary preprocessing (used in ensemble fallback):
-      bilateral filter → deskew → adaptive threshold → morphological open
+      bilateral filter -> deskew -> adaptive threshold -> morphological open
     Returns a BGR image.
     """
     img = cv2.imread(image_path)
@@ -133,7 +133,7 @@ def preprocess_image_for_ocr(image_path: str) -> np.ndarray:
     return cv2.cvtColor(cleaned, cv2.COLOR_GRAY2BGR)
 
 
-# ─────────────────────────────────── Text Utilities ─────────────────────────
+# ----------------------------------- Text Utilities -------------------------
 
 def normalize_text(text: str) -> str:
     text = text.replace('\r', ' ').replace('\n', ' ')
@@ -149,7 +149,7 @@ def clean_ocr_noise(text: str) -> str:
     return re.sub(r'\s+', ' ', text).strip()
 
 
-_ENCIRCLED_DIGITS = {chr(9312 + i): str(i + 1) for i in range(20)}  # ①→1 … ⑳→20
+_ENCIRCLED_DIGITS = {chr(9312 + i): str(i + 1) for i in range(20)}  # ①->1 … ⑳->20
 
 
 def normalize_encircled_digits(text: str) -> str:
@@ -159,7 +159,7 @@ def normalize_encircled_digits(text: str) -> str:
     return text
 
 
-# ─────────────────────────────────── OCR Engines ────────────────────────────
+# ----------------------------------- OCR Engines ----------------------------
 
 def pytesseract_lines_from_image(img_bgr: np.ndarray) -> List[Dict]:
     """Run Pytesseract and return line-level blocks."""
@@ -198,18 +198,41 @@ def pytesseract_lines_from_image(img_bgr: np.ndarray) -> List[Dict]:
 
 
 def easyocr_blocks_from_image(img_bgr: np.ndarray, ocr_reader) -> List[Dict]:
-    """Run EasyOCR and return block-level results with unified bbox format."""
-    easy_res = ocr_reader.readtext(img_bgr, detail=1)
-    out = []
-    for bbox, text, conf in easy_res:
-        xs, ys = zip(*bbox)
-        x, y = min(xs), min(ys)
-        w, h = max(xs) - x, max(ys) - y
-        out.append({"text": text, "conf": float(conf) * 100.0, "bbox": (x, y, w, h), "cy": y + h / 2.0})
+    """Run EasyOCR and return block-level results with unified bbox format.
+
+    Uses a two-pass strategy:
+      Pass 1: standard thresholds (text=0.7, low_text=0.4) - fast, low noise.
+      Pass 2: relaxed thresholds (text=0.3, low_text=0.25) - only triggered when
+              pass-1 returns < 5 blocks, indicating faint / light handwriting.
+    This ensures clean notebook images are completely unaffected while still
+    recovering faint cursive strokes on washed-out photos.
+    """
+    def _parse(results):
+        out = []
+        for bbox, text, conf in results:
+            xs, ys = zip(*bbox)
+            x, y = min(xs), min(ys)
+            w, h = max(xs) - x, max(ys) - y
+            out.append({"text": text, "conf": float(conf) * 100.0, "bbox": (x, y, w, h), "cy": y + h / 2.0})
+        return out
+
+    # Pass 1 - standard thresholds
+    res = ocr_reader.readtext(img_bgr, detail=1, text_threshold=0.7, low_text=0.4)
+    out = _parse(res)
+
+    # Pass 2 - relaxed, only if page looks almost empty (< 5 blocks found)
+    if len(out) < 5:
+        print(f"  [EasyOCR] Only {len(out)} blocks at standard threshold, retrying with lower thresholds...")
+        res2 = ocr_reader.readtext(img_bgr, detail=1, text_threshold=0.3, low_text=0.25)
+        out2 = _parse(res2)
+        if len(out2) > len(out):
+            print(f"  [EasyOCR] Relaxed pass found {len(out2)} blocks - using those.")
+            return out2
+
     return out
 
 
-# ─────────────────────────────────── Ensemble Merger ────────────────────────
+# ----------------------------------- Ensemble Merger ------------------------
 
 def bbox_iou(boxA: tuple, boxB: tuple) -> float:
     xA = max(boxA[0], boxB[0])
@@ -258,7 +281,7 @@ def ensemble_ocr_preprocessed(img_bgr: np.ndarray, ocr_reader) -> List[Dict]:
     return sorted(merged, key=lambda x: x['cy'])
 
 
-# ─────────────────────────────────── TrOCR ──────────────────────────────────
+# ----------------------------------- TrOCR ----------------------------------
 
 def load_trocr(device: str = DEVICE):
     """Load TrOCR (small-handwritten) with optional LoRA adapter."""
@@ -323,8 +346,7 @@ def trocr_recognize_pil(pil_img: Image.Image, bundle: dict, max_new_tokens: int 
             max_new_tokens=max_new_tokens, 
             num_beams=num_beams, 
             do_sample=False,
-            repetition_penalty=1.2,
-            no_repeat_ngram_size=3
+            repetition_penalty=1.05
         )
     return tokenizer.decode(ids[0], skip_special_tokens=True).strip()
 
@@ -355,14 +377,18 @@ def recognize_with_trocr_per_line(
     filtered = sorted(filtered, key=lambda b: b['bbox'][1])
 
     def _preprocess_crop(crop_bgr: np.ndarray) -> np.ndarray:
-        # Preprocessing: Convert to grayscale and apply CLAHE to boost contrast.
-        # Avoid harsh binarization and morphological ops that destroy thin handwriting.
+        # Intelligent Preprocessing: Only boost contrast if the image is washed out or dark
         gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
-        try:
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            gray = clahe.apply(gray)
-        except Exception:
-            pass
+        std_dev = np.std(gray)
+        mean_val = np.mean(gray)
+        
+        if std_dev < 40 or mean_val < 100:
+            try:
+                clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
+                gray = clahe.apply(gray)
+            except Exception:
+                pass
+                
         # Return as BGR since TrOCR processor converts it back to Pil/RGB anyway
         return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
@@ -388,7 +414,7 @@ def recognize_with_trocr_per_line(
     return joined, results
 
 
-# ─────────────────────────────────── Block Merging ──────────────────────────
+# ----------------------------------- Block Merging --------------------------
 
 def merge_nearby_horizontal_blocks(blocks: List[Dict], gap_thresh: int = 20) -> List[Dict]:
     """Merge text blocks that are on the same horizontal line."""
@@ -398,7 +424,7 @@ def merge_nearby_horizontal_blocks(blocks: List[Dict], gap_thresh: int = 20) -> 
     merged = [blocks[0].copy()]
     for b in blocks[1:]:
         cur = merged[-1]
-        if abs(b['cy'] - cur['cy']) <= max(12, 0.4 * cur['bbox'][3]):
+        if abs(b['cy'] - cur['cy']) <= 0.6 * min(cur['bbox'][3], b['bbox'][3]):
             cur_r = cur['bbox'][0] + cur['bbox'][2]
             if b['bbox'][0] - cur_r <= gap_thresh:
                 nl = min(cur['bbox'][0], b['bbox'][0])
@@ -422,7 +448,8 @@ def coalesce_blocks(blocks: List[Dict], y_tol: int = 12) -> List[Dict]:
         return []
     groups = [[blocks[0]]]
     for b in blocks[1:]:
-        if abs(b["cy"] - groups[-1][-1]["cy"]) <= y_tol:
+        prev = groups[-1][-1]
+        if abs(b["cy"] - prev["cy"]) <= 0.8 * min(prev['bbox'][3], b['bbox'][3]):
             groups[-1].append(b)
         else:
             groups.append([b])
@@ -443,7 +470,7 @@ def coalesce_blocks(blocks: List[Dict], y_tol: int = 12) -> List[Dict]:
     return sorted(out, key=lambda x: x['cy'])
 
 
-# ─────────────────────────────────── Question Splitter ──────────────────────
+# ----------------------------------- Question Splitter ----------------------
 
 def split_text_by_question(blocks: List[Dict]) -> List[Dict]:
     """
@@ -518,7 +545,7 @@ def split_text_by_question(blocks: List[Dict]) -> List[Dict]:
     return segments
 
 
-# ─────────────────────────────────── Main Entry ──────────────────────────────
+# ----------------------------------- Main Entry ------------------------------
 
 def extract_text_from_image(
     image_path: str,
@@ -554,7 +581,7 @@ def extract_text_from_image(
     print(f" Extracting: {os.path.basename(image_path)}")
     print(f"{'='*60}")
 
-    # ── 0. Pre-process: CLAHE + ruled-line removal ─────────────────────────
+    # -- 0. Pre-process: CLAHE + ruled-line removal -------------------------
     raw = cv2.imread(image_path)
     if raw is None:
         raise ValueError(f"cv2 could not read: {image_path}")
@@ -565,27 +592,32 @@ def extract_text_from_image(
     with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp:
         cv2.imwrite(tmp.name, cleaned)
         ocr_source_path = tmp.name
-    print(f"  [preprocess] saved cleaned image → {ocr_source_path}")
+    print(f"  [preprocess] saved cleaned image -> {ocr_source_path}")
 
     if save_preprocessed:
         base, ext = os.path.splitext(image_path)
         out_path = base + "_preprocessed" + ext
         cv2.imwrite(out_path, cleaned)
-        print(f"  [preprocess] also saved to → {out_path}")
+        print(f"  [preprocess] also saved to -> {out_path}")
 
-    # ── 1. EasyOCR layout ─────────────────────────────────────────────────
+    # -- 1. EasyOCR layout -------------------------------------------------
     print("  [OCR] Loading EasyOCR ...")
     t0 = time.time()
     ocr_reader = easyocr.Reader(['en'], gpu=(DEVICE == "cuda"))
     print(f"  [OCR] EasyOCR ready in {time.time()-t0:.1f}s")
 
-    easy_layout = easyocr_blocks_from_image(cv2.imread(ocr_source_path), ocr_reader)
+    # Run EasyOCR layout detection on the RAW image, not the preprocessed one.
+    # Reason: ruled-line removal can cut through connected cursive strokes, causing
+    # EasyOCR to fragment a single line into many tiny disconnected boxes.
+    # The raw image preserves stroke connectivity for better layout grouping.
+    # TrOCR still reads crops from ocr_source_path (cleaned) below.
+    easy_layout = easyocr_blocks_from_image(raw, ocr_reader)
     print(f"  [OCR] EasyOCR detected {len(easy_layout)} blocks")
 
     ocr_mode = "ensemble_fallback"
     blocks: List[Dict] = []
 
-    # ── 2. TrOCR refinement (optional) ───────────────────────────────────
+    # -- 2. TrOCR refinement (optional) -----------------------------------
     if use_trocr:
         try:
             trocr_bundle = load_trocr(DEVICE)
@@ -607,7 +639,7 @@ def extract_text_from_image(
         except Exception as exc:
             print(f"  [TrOCR] failed ({exc}), falling back to ensemble.")
 
-    # ── 3. Ensemble fallback ──────────────────────────────────────────────
+    # -- 3. Ensemble fallback ----------------------------------------------
     if not blocks:
         print("  [OCR] Running ensemble (EasyOCR + Pytesseract) ...")
         processed_bgr = preprocess_image_for_ocr(ocr_source_path)
@@ -624,12 +656,12 @@ def extract_text_from_image(
     except Exception:
         pass
 
-    # ── 4. Merge + coalesce ───────────────────────────────────────────────
+    # -- 4. Merge + coalesce -----------------------------------------------
     blocks = merge_nearby_horizontal_blocks(blocks, gap_thresh=20)
     blocks = coalesce_blocks(blocks, y_tol=12)
     print(f"  [merge] {len(blocks)} blocks after merging")
 
-    # ── 5. Full text + question splitting ────────────────────────────────
+    # -- 5. Full text + question splitting --------------------------------
     full_text = clean_ocr_noise(" ".join(b["text"] for b in blocks))
     avg_conf = float(np.mean([b.get("conf", 0) for b in blocks])) if blocks else 0.0
 
@@ -645,20 +677,20 @@ def extract_text_from_image(
     }
 
 
-# ─────────────────────────────────── CLI ─────────────────────────────────────
+# ----------------------------------- CLI -------------------------------------
 
 def _pretty_print(result: Dict) -> None:
-    print(f"\n{'─'*60}")
+    print(f"\n{'-'*60}")
     print(f"  OCR mode  : {result['ocr_mode']}")
     print(f"  Avg conf  : {result['avg_conf']:.1f}%")
     print(f"  Blocks    : {len(result['blocks'])}")
     print(f"  Segments  : {len(result['segments'])}")
-    print(f"\n  ── FULL TEXT ──────────────────────────────────────────────")
+    print(f"\n  -- FULL TEXT ----------------------------------------------")
     print(f"  {result['full_text']}")
-    print(f"\n  ── SEGMENTS ───────────────────────────────────────────────")
+    print(f"\n  -- SEGMENTS -----------------------------------------------")
     for seg in result['segments']:
-        print(f"  Q{seg['q_label']} (y≈{seg['y_pct']:.2f}): {seg['text'][:120]}")
-    print(f"{'─'*60}\n")
+        print(f"  Q{seg['q_label']} (y~{seg['y_pct']:.2f}): {seg['text'][:120]}")
+    print(f"{'-'*60}\n")
 
 
 if __name__ == "__main__":
