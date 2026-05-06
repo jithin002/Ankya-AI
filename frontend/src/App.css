@@ -287,25 +287,34 @@ input:focus, textarea:focus, select:focus { outline: none; border-color: var(--p
 
 .score-table {
   width: 100%; border-collapse: separate; border-spacing: 0;
-  border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+  border: 2px solid var(--primary); border-radius: 8px; overflow: hidden;
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.15);
   margin-top: .75rem;
 }
 .score-table th, .score-table td {
   border-bottom: 1px solid var(--border);
   border-right: 1px solid var(--border);
   padding: .6rem .75rem; text-align: center;
+  background: rgba(99, 102, 241, 0.03);
 }
-.score-table th { background: var(--glass-hover); font-size: .8rem; color: var(--muted); }
+.score-table th { background: rgba(99, 102, 241, 0.1); font-size: .8rem; color: var(--primary); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
 .score-table tr:last-child td { border-bottom: none; }
 .score-table td:last-child, .score-table th:last-child { border-right: none; }
 
 .score-cell {
-  width: 58px;
+  width: 75px;
   background: var(--score-cell-bg); color: var(--success);
-  border: 1px solid transparent; border-radius: 4px;
+  border: 1px solid var(--primary); border-radius: 6px;
   text-align: center; font-size: 1.15rem; font-weight: 700;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.05) inset;
 }
-.score-cell:hover, .score-cell:focus { border-color: var(--primary); outline: none; }
+.score-cell:hover, .score-cell:focus { border-color: var(--secondary); outline: none; box-shadow: 0 0 0 2px rgba(236,72,153,0.2); }
+.score-cell::-webkit-inner-spin-button,
+.score-cell::-webkit-outer-spin-button {
+  opacity: 1;
+  cursor: pointer;
+  height: 30px;
+}
 
 /* ── Metric Bars ──────────────────────────────────────────────────────────────── */
 
